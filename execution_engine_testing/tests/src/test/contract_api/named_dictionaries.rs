@@ -1,8 +1,7 @@
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, LOCAL_GENESIS_REQUEST,
 };
-use casper_types::{runtime_args, RuntimeArgs};
+use casper_types::runtime_args;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 #[ignore]
@@ -19,8 +18,8 @@ fn named_dictionaries_should_work_as_expected() {
         .map(|_| (rng.gen_range(0..9), rng.gen_range(0..20), rng.gen()))
         .collect();
 
-    let builder = &mut InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let builder = &mut LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
     builder
         .exec(
             ExecuteRequestBuilder::standard(

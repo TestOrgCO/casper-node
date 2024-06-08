@@ -4,7 +4,7 @@
 //! `casper-node` library.
 
 mod condition_check_reactor;
-mod fake_deploy_acceptor;
+mod fake_transaction_acceptor;
 pub(crate) mod filter_reactor;
 pub(crate) mod network;
 pub(crate) mod test_clock;
@@ -31,7 +31,7 @@ use tempfile::TempDir;
 use tokio::runtime::{self, Runtime};
 use tracing::{debug, warn};
 
-use casper_types::{testing::TestRng, TimeDiff, Timestamp};
+use casper_types::testing::TestRng;
 
 use crate::{
     components::Component,
@@ -43,10 +43,9 @@ use crate::{
     logging,
     protocol::Message,
     reactor::{EventQueueHandle, QueueKind, ReactorEvent, Scheduler},
-    types::Deploy,
 };
 pub(crate) use condition_check_reactor::ConditionCheckReactor;
-pub(crate) use fake_deploy_acceptor::FakeDeployAcceptor;
+pub(crate) use fake_transaction_acceptor::FakeTransactionAcceptor;
 
 /// Time to wait (at most) for a `fatal` to resolve before considering the dropping of a responder a
 /// problem.
@@ -73,6 +72,35 @@ const TEST_PORT_RANGE: Range<u16> = 60001..60998;
 
 /// Random offset + stride for port generation.
 const TEST_PORT_STRIDE: u16 = 29;
+
+macro_rules! map {
+    () => { std::collections::BTreeMap::new() };
+    ( $first_key:expr => $first_value:expr $( , $key:expr => $value:expr )* $(,)? ) => {{
+        let mut map = std::collections::BTreeMap::new();
+        // There is no reason to add twice the same key.
+        // Since it's used for testing, we can panic in such a case:
+        assert!(map.insert($first_key, $first_value).is_none());
+        $(
+            assert!(map.insert($key, $value).is_none());
+        )*
+        map
+    }};
+}
+macro_rules! set {
+    () => { std::collections::BTreeSet::new() };
+    ( $first_value:expr $( , $value:expr )* $(,)? ) => {{
+        let mut set = std::collections::BTreeSet::new();
+        // There is no reason to add twice the same key.
+        // Since it's used for testing, we can panic in such a case:
+        assert!(set.insert($first_value));
+        $(
+            assert!(set.insert($value));
+        )*
+        set
+    }}
+}
+pub(crate) use map;
+pub(crate) use set;
 
 /// Create an unused port on localhost.
 ///
@@ -364,38 +392,6 @@ pub(crate) async fn advance_time(duration: time::Duration) {
     tokio::time::advance(duration).await;
     tokio::time::resume();
     debug!("advanced time by {} secs", duration.as_secs());
-}
-
-/// Creates a test deploy created at given instant and with given ttl.
-pub(crate) fn create_test_deploy(
-    created_ago: TimeDiff,
-    ttl: TimeDiff,
-    now: Timestamp,
-    test_rng: &mut TestRng,
-) -> Deploy {
-    Deploy::random_with_timestamp_and_ttl(test_rng, now - created_ago, ttl)
-}
-
-/// Creates a random deploy that is considered expired.
-pub(crate) fn create_expired_deploy(now: Timestamp, test_rng: &mut TestRng) -> Deploy {
-    create_test_deploy(
-        TimeDiff::from_seconds(20),
-        TimeDiff::from_seconds(10),
-        now,
-        test_rng,
-    )
-}
-
-// TODO - remove `allow` once used in tests again.
-#[allow(dead_code)]
-/// Creates a random deploy that is considered not expired.
-pub(crate) fn create_not_expired_deploy(now: Timestamp, test_rng: &mut TestRng) -> Deploy {
-    create_test_deploy(
-        TimeDiff::from_seconds(20),
-        TimeDiff::from_seconds(60),
-        now,
-        test_rng,
-    )
 }
 
 /// Assert that the file at `schema_path` matches the provided `actual_schema`, which can be derived

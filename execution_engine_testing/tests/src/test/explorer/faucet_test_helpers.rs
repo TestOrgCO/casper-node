@@ -1,21 +1,20 @@
 use rand::Rng;
 
 use casper_engine_test_support::{
-    DeployItemBuilder, ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR,
-    DEFAULT_PAYMENT,
+    DeployItemBuilder, EntityWithNamedKeys, ExecuteRequest, ExecuteRequestBuilder,
+    LmdbWasmTestBuilder, TransferRequestBuilder, DEFAULT_PAYMENT,
 };
-use casper_execution_engine::core::engine_state::ExecuteRequest;
+use casper_storage::data_access_layer::TransferRequest;
 use casper_types::{
-    account::AccountHash, bytesrepr::FromBytes, runtime_args, system::mint, CLTyped, Contract,
-    ContractHash, Key, PublicKey, RuntimeArgs, URef, U512,
+    account::AccountHash, bytesrepr::FromBytes, runtime_args, AddressableEntityHash, CLTyped, Key,
+    PublicKey, URef, U512,
 };
 
 use super::{
     ARG_AMOUNT, ARG_AVAILABLE_AMOUNT, ARG_DISTRIBUTIONS_PER_INTERVAL, ARG_ID, ARG_TARGET,
-    ARG_TIME_INTERVAL, AVAILABLE_AMOUNT_NAMED_KEY, ENTRY_POINT_AUTHORIZE_TO, ENTRY_POINT_FAUCET,
-    ENTRY_POINT_SET_VARIABLES, FAUCET_CONTRACT_NAMED_KEY, FAUCET_FUND_AMOUNT, FAUCET_ID,
-    FAUCET_INSTALLER_SESSION, FAUCET_PURSE_NAMED_KEY, INSTALLER_ACCOUNT, INSTALLER_FUND_AMOUNT,
-    REMAINING_REQUESTS_NAMED_KEY,
+    ARG_TIME_INTERVAL, ENTRY_POINT_AUTHORIZE_TO, ENTRY_POINT_FAUCET, ENTRY_POINT_SET_VARIABLES,
+    FAUCET_CONTRACT_NAMED_KEY, FAUCET_FUND_AMOUNT, FAUCET_ID, FAUCET_INSTALLER_SESSION,
+    FAUCET_PURSE_NAMED_KEY, INSTALLER_ACCOUNT, INSTALLER_FUND_AMOUNT,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -45,16 +44,12 @@ impl FundAccountRequestBuilder {
         self
     }
 
-    pub fn build(&self) -> ExecuteRequest {
-        ExecuteRequestBuilder::transfer(
-            *DEFAULT_ACCOUNT_ADDR,
-            runtime_args! {
-                mint::ARG_TARGET => self.target_account,
-                mint::ARG_AMOUNT => self.fund_amount,
-                mint::ARG_ID => self.fund_id
-            },
-        )
-        .build()
+    pub fn build(&self) -> TransferRequest {
+        let mut builder = TransferRequestBuilder::new(self.fund_amount, self.target_account);
+        if let Some(id) = self.fund_id {
+            builder = builder.with_transfer_id(id);
+        }
+        builder.build()
     }
 }
 
@@ -128,7 +123,7 @@ impl Default for FaucetInstallSessionRequestBuilder {
 #[derive(Debug, Copy, Clone)]
 pub struct FaucetConfigRequestBuilder {
     installer_account: AccountHash,
-    faucet_contract_hash: Option<ContractHash>,
+    faucet_contract_hash: Option<AddressableEntityHash>,
     available_amount: Option<U512>,
     time_interval: Option<u64>,
     distributions_per_interval: Option<u64>,
@@ -140,7 +135,7 @@ impl FaucetConfigRequestBuilder {
         self
     }
 
-    pub fn with_faucet_contract_hash(mut self, contract_hash: ContractHash) -> Self {
+    pub fn with_faucet_contract_hash(mut self, contract_hash: AddressableEntityHash) -> Self {
         self.faucet_contract_hash = Some(contract_hash);
         self
     }
@@ -194,7 +189,7 @@ impl Default for FaucetConfigRequestBuilder {
 pub struct FaucetAuthorizeAccountRequestBuilder {
     installer_account: AccountHash,
     authorized_account_public_key: Option<PublicKey>,
-    faucet_contract_hash: Option<ContractHash>,
+    faucet_contract_hash: Option<AddressableEntityHash>,
 }
 
 impl FaucetAuthorizeAccountRequestBuilder {
@@ -202,7 +197,10 @@ impl FaucetAuthorizeAccountRequestBuilder {
         FaucetAuthorizeAccountRequestBuilder::default()
     }
 
-    pub fn with_faucet_contract_hash(mut self, faucet_contract_hash: Option<ContractHash>) -> Self {
+    pub fn with_faucet_contract_hash(
+        mut self,
+        faucet_contract_hash: Option<AddressableEntityHash>,
+    ) -> Self {
         self.faucet_contract_hash = faucet_contract_hash;
         self
     }
@@ -259,7 +257,7 @@ impl FaucetCallerAccount {
 }
 
 pub struct FaucetFundRequestBuilder {
-    faucet_contract_hash: Option<ContractHash>,
+    faucet_contract_hash: Option<AddressableEntityHash>,
     caller_account: FaucetCallerAccount,
     arg_target: Option<AccountHash>,
     arg_fund_amount: Option<U512>,
@@ -298,13 +296,11 @@ impl FaucetFundRequestBuilder {
         self
     }
 
-    pub fn with_faucet_contract_hash(mut self, faucet_contract_hash: ContractHash) -> Self {
+    pub fn with_faucet_contract_hash(
+        mut self,
+        faucet_contract_hash: AddressableEntityHash,
+    ) -> Self {
         self.faucet_contract_hash = Some(faucet_contract_hash);
-        self
-    }
-
-    pub fn with_block_time(mut self, block_time: u64) -> Self {
-        self.block_time = Some(block_time);
         self
     }
 
@@ -335,15 +331,15 @@ impl FaucetFundRequestBuilder {
                     },
                 },
             )
-            .with_empty_payment_bytes(runtime_args! {ARG_AMOUNT => self.payment_amount})
+            .with_standard_payment(runtime_args! {ARG_AMOUNT => self.payment_amount})
             .with_deploy_hash(rng.gen())
             .build();
 
         match self.block_time {
-            Some(block_time) => ExecuteRequestBuilder::from_deploy_item(deploy_item)
+            Some(block_time) => ExecuteRequestBuilder::from_deploy_item(&deploy_item)
                 .with_block_time(block_time)
                 .build(),
-            None => ExecuteRequestBuilder::from_deploy_item(deploy_item).build(),
+            None => ExecuteRequestBuilder::from_deploy_item(&deploy_item).build(),
         }
     }
 }
@@ -363,7 +359,7 @@ impl Default for FaucetFundRequestBuilder {
 }
 
 pub fn query_stored_value<T: CLTyped + FromBytes>(
-    builder: &mut InMemoryWasmTestBuilder,
+    builder: &mut LmdbWasmTestBuilder,
     base_key: Key,
     path: Vec<String>,
 ) -> T {
@@ -377,72 +373,40 @@ pub fn query_stored_value<T: CLTyped + FromBytes>(
         .expect("must get value")
 }
 
-pub fn get_faucet_contract_hash(
-    builder: &InMemoryWasmTestBuilder,
+pub fn get_faucet_entity_hash(
+    builder: &LmdbWasmTestBuilder,
     installer_account: AccountHash,
-) -> ContractHash {
+) -> AddressableEntityHash {
     builder
-        .get_expected_account(installer_account)
+        .get_entity_with_named_keys_by_account_hash(installer_account)
+        .unwrap()
         .named_keys()
         .get(&format!("{}_{}", FAUCET_CONTRACT_NAMED_KEY, FAUCET_ID))
         .cloned()
-        .and_then(Key::into_hash)
-        .map(ContractHash::new)
+        .and_then(Key::into_entity_hash_addr)
+        .map(AddressableEntityHash::new)
         .expect("failed to find faucet contract")
 }
 
-pub fn get_faucet_contract(
-    builder: &InMemoryWasmTestBuilder,
+pub fn get_faucet_entity(
+    builder: &LmdbWasmTestBuilder,
     installer_account: AccountHash,
-) -> Contract {
+) -> EntityWithNamedKeys {
     builder
-        .get_contract(get_faucet_contract_hash(builder, installer_account))
+        .get_entity_with_named_keys_by_entity_hash(get_faucet_entity_hash(
+            builder,
+            installer_account,
+        ))
         .expect("failed to find faucet contract")
 }
 
-pub fn get_faucet_purse(builder: &InMemoryWasmTestBuilder, installer_account: AccountHash) -> URef {
-    get_faucet_contract(builder, installer_account)
+pub fn get_faucet_purse(builder: &LmdbWasmTestBuilder, installer_account: AccountHash) -> URef {
+    get_faucet_entity(builder, installer_account)
         .named_keys()
         .get(FAUCET_PURSE_NAMED_KEY)
         .cloned()
         .and_then(Key::into_uref)
         .expect("failed to find faucet purse")
-}
-
-pub fn get_available_amount(
-    builder: &InMemoryWasmTestBuilder,
-    faucet_contract_hash: ContractHash,
-) -> U512 {
-    builder
-        .query(
-            None,
-            faucet_contract_hash.into(),
-            &[AVAILABLE_AMOUNT_NAMED_KEY.to_string()],
-        )
-        .expect("failed to find available amount named key")
-        .as_cl_value()
-        .cloned()
-        .expect("failed to convert to cl value")
-        .into_t::<U512>()
-        .expect("failed to convert into U512")
-}
-
-pub fn get_remaining_requests(
-    builder: &InMemoryWasmTestBuilder,
-    faucet_contract_hash: ContractHash,
-) -> U512 {
-    builder
-        .query(
-            None,
-            faucet_contract_hash.into(),
-            &[REMAINING_REQUESTS_NAMED_KEY.to_string()],
-        )
-        .expect("failed to find available amount named key")
-        .as_cl_value()
-        .cloned()
-        .expect("failed to convert to cl value")
-        .into_t::<U512>()
-        .expect("failed to convert into U512")
 }
 
 pub struct FaucetDeployHelper {
@@ -453,7 +417,7 @@ pub struct FaucetDeployHelper {
     faucet_purse_fund_amount: U512,
     faucet_installer_session: String,
     faucet_id: u64,
-    faucet_contract_hash: Option<ContractHash>,
+    faucet_contract_hash: Option<AddressableEntityHash>,
     faucet_distributions_per_interval: Option<u64>,
     faucet_available_amount: Option<U512>,
     faucet_time_interval: Option<u64>,
@@ -508,19 +472,19 @@ impl FaucetDeployHelper {
 
     pub fn query_and_set_faucet_contract_hash(
         &mut self,
-        builder: &InMemoryWasmTestBuilder,
-    ) -> ContractHash {
-        let contract_hash = get_faucet_contract_hash(builder, self.installer_account());
+        builder: &LmdbWasmTestBuilder,
+    ) -> AddressableEntityHash {
+        let contract_hash = get_faucet_entity_hash(builder, self.installer_account());
         self.faucet_contract_hash = Some(contract_hash);
 
         contract_hash
     }
 
-    pub fn query_faucet_purse(&self, builder: &InMemoryWasmTestBuilder) -> URef {
+    pub fn query_faucet_purse(&self, builder: &LmdbWasmTestBuilder) -> URef {
         get_faucet_purse(builder, self.installer_account())
     }
 
-    pub fn query_faucet_purse_balance(&self, builder: &InMemoryWasmTestBuilder) -> U512 {
+    pub fn query_faucet_purse_balance(&self, builder: &LmdbWasmTestBuilder) -> U512 {
         let faucet_purse = self.query_faucet_purse(builder);
         builder.get_purse_balance(faucet_purse)
     }
@@ -529,7 +493,7 @@ impl FaucetDeployHelper {
         self.faucet_purse_fund_amount
     }
 
-    pub fn faucet_contract_hash(&self) -> Option<ContractHash> {
+    pub fn faucet_contract_hash(&self) -> Option<AddressableEntityHash> {
         self.faucet_contract_hash
     }
 
@@ -541,7 +505,7 @@ impl FaucetDeployHelper {
         self.faucet_time_interval
     }
 
-    pub fn fund_installer_request(&self) -> ExecuteRequest {
+    pub fn fund_installer_request(&self) -> TransferRequest {
         self.fund_account_request_builder
             .with_target_account(self.installer_account)
             .with_fund_amount(self.installer_fund_amount)

@@ -5,11 +5,11 @@ use std::{
 
 use derive_more::From;
 
-use casper_types::EraId;
+use casper_types::{BlockHash, BlockSignaturesV2, BlockV2, EraId, FinalitySignatureV2};
 
 use crate::{
     effect::requests::BlockAccumulatorRequest,
-    types::{Block, BlockHash, BlockSignatures, FinalitySignature, MetaBlock, NodeId},
+    types::{ForwardMetaBlock, NodeId},
 };
 
 #[derive(Debug, From)]
@@ -22,22 +22,22 @@ pub(crate) enum Event {
         sender: NodeId,
     },
     ReceivedBlock {
-        block: Arc<Block>,
+        block: Arc<BlockV2>,
         sender: NodeId,
     },
     CreatedFinalitySignature {
-        finality_signature: Box<FinalitySignature>,
+        finality_signature: Box<FinalitySignatureV2>,
     },
     ReceivedFinalitySignature {
-        finality_signature: Box<FinalitySignature>,
+        finality_signature: Box<FinalitySignatureV2>,
         sender: NodeId,
     },
     ExecutedBlock {
-        meta_block: MetaBlock,
+        meta_block: ForwardMetaBlock,
     },
     Stored {
-        maybe_meta_block: Option<MetaBlock>,
-        maybe_block_signatures: Option<BlockSignatures>,
+        maybe_meta_block: Option<ForwardMetaBlock>,
+        maybe_block_signatures: Option<BlockSignaturesV2>,
     },
 }
 
@@ -85,7 +85,7 @@ impl Display for Event {
                     meta_block.block.hash(),
                     maybe_block_signatures
                         .as_ref()
-                        .map(|sigs| sigs.proofs.len())
+                        .map(|sigs| sigs.len())
                         .unwrap_or_default()
                 )
             }
@@ -98,7 +98,7 @@ impl Display for Event {
                     "stored {} finality signatures",
                     maybe_block_signatures
                         .as_ref()
-                        .map(|sigs| sigs.proofs.len())
+                        .map(|sigs| sigs.len())
                         .unwrap_or_default()
                 )
             }

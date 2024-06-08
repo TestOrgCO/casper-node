@@ -593,9 +593,6 @@ where
                         value,
                         relative_height,
                     );
-                    if let Some(t) = terminal_block_data {
-                        warn!(?t.rewards, "rewards and inactive validators are not verified yet");
-                    }
                     self.node_mut(&validator_id)?.push_finalized(value);
                     vec![]
                 }

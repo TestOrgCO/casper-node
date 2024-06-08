@@ -1,7 +1,6 @@
 use datasize::DataSize;
 
-use crate::types::BlockHeader;
-use casper_types::{TimeDiff, Timestamp};
+use casper_types::{BlockHeader, TimeDiff, Timestamp};
 
 #[derive(DataSize, Debug)]
 pub struct MaxTtl(TimeDiff);
@@ -48,9 +47,9 @@ impl From<TimeDiff> for MaxTtl {
 
 #[cfg(test)]
 mod tests {
-    use casper_types::{testing::TestRng, ProtocolVersion, TimeDiff, Timestamp};
+    use casper_types::{testing::TestRng, TestBlockBuilder, TimeDiff, Timestamp};
 
-    use crate::types::{Block, MaxTtl};
+    use crate::types::MaxTtl;
 
     const SUB_MAX_TTL: TimeDiff = TimeDiff::from_millis(1);
     const MAX_TTL: TimeDiff = TimeDiff::from_millis(2);
@@ -114,32 +113,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn should_not_err() {
+        let higher = Timestamp::now();
+        let lower = higher.saturating_sub(SUB_MAX_TTL);
+        let max_ttl: MaxTtl = MAX_TTL.into();
+        let elapsed = max_ttl.ttl_elapsed(lower, higher);
+        assert!(
+            !elapsed,
+            "can't have elapsed because timestamps are chronologically reversed (programmer error)"
+        );
+    }
+
     fn assert_sync_to_ttl(is_genesis: bool, ttl_synced_expected: bool, msg: &str) {
         let max_ttl: MaxTtl = MAX_TTL.into();
-        let mut rng = TestRng::new();
+        let rng = &mut TestRng::new();
         let (latest_switch_block_timestamp, highest_orphaned_block_header) = if is_genesis {
-            let block = Block::random_with_specifics(
-                &mut rng,
-                0.into(),
-                0,
-                ProtocolVersion::default(),
-                true,
-                None,
-            );
+            let block = TestBlockBuilder::new()
+                .era(0)
+                .height(0)
+                .switch_block(true)
+                .build(rng);
             // it does not matter what this value is; if genesis has been reached
             // while walking backwards, there are no earlier blocks to get
             // thus all sync scenarios have succeeded / are satisfied
-            let timestamp = Timestamp::random(&mut rng);
+            let timestamp = Timestamp::random(rng);
             (timestamp, block.header().clone())
         } else {
-            let block = Block::random_with_specifics(
-                &mut rng,
-                1.into(),
-                1,
-                ProtocolVersion::default(),
-                false,
-                None,
-            );
+            let block = TestBlockBuilder::new()
+                .era(1)
+                .height(1)
+                .switch_block(false)
+                .build(rng);
             // project a sufficiently advanced future timestamp for the test.
             let mut timestamp = block.timestamp().saturating_add(max_ttl.value());
             if ttl_synced_expected {
@@ -149,7 +154,7 @@ mod tests {
         };
         let synced = max_ttl.synced_to_ttl(
             latest_switch_block_timestamp,
-            &highest_orphaned_block_header,
+            &highest_orphaned_block_header.into(),
         );
         assert_eq!(synced, ttl_synced_expected, "{}", msg);
     }

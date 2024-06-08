@@ -12,8 +12,10 @@ use datasize::DataSize;
 use fake_instant::FakeClock as Instant;
 use tracing::{error, trace, warn};
 
+use casper_types::DisplayIter;
+
 use super::Config;
-use crate::{effect::GossipTarget, types::NodeId, utils::DisplayIter};
+use crate::{effect::GossipTarget, types::NodeId};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum GossipAction {
@@ -228,7 +230,7 @@ impl<T: Clone + Eq + Hash + Display> GossipTable<T> {
     }
 
     /// We received knowledge about potentially new data with given ID from the given peer.  This
-    /// should only be called where we don't already hold everything locally we need to be able to
+    /// should only be called where we don't already hold everything locally needed to be able to
     /// gossip it onwards.  If we are able to gossip the data already, call `new_complete_data`
     /// instead.
     ///
@@ -271,7 +273,7 @@ impl<T: Clone + Eq + Hash + Display> GossipTable<T> {
     /// its ID should be passed in `maybe_holder`.  If received from a client or generated on this
     /// node, `maybe_holder` should be `None`.
     ///
-    /// This should only be called once we hold everything locally we need to be able to gossip it
+    /// This should only be called once we hold everything locally needed to be able to gossip it
     /// onwards.  If we aren't able to gossip this data yet, call `new_data_id` instead.
     ///
     /// Returns whether we should gossip it, and a list of peers to exclude.
@@ -540,14 +542,12 @@ impl<T: Clone + Eq + Hash + Display> GossipTable<T> {
 mod tests {
     use std::{collections::BTreeSet, iter, str::FromStr};
 
-    use casper_types::testing::TestRng;
-
     use rand::Rng;
 
-    use casper_types::TimeDiff;
+    use casper_types::{testing::TestRng, DisplayIter, TimeDiff};
 
     use super::{super::config::DEFAULT_FINISHED_ENTRY_DURATION, *};
-    use crate::{logging, utils::DisplayIter};
+    use crate::logging;
 
     const EXPECTED_DEFAULT_INFECTION_TARGET: usize = 3;
     const EXPECTED_DEFAULT_ATTEMPTED_TO_INFECT_LIMIT: usize = 15;

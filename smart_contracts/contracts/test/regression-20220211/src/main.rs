@@ -6,8 +6,8 @@ use casper_contract::{
     unwrap_or_revert::UnwrapOrRevert,
 };
 use casper_types::{
-    contracts::Parameters, AccessRights, CLType, CLValue, EntryPoint, EntryPointAccess,
-    EntryPointType, EntryPoints, URef,
+    addressable_entity::Parameters, AccessRights, CLType, CLValue, EntryPoint, EntryPointAccess,
+    EntryPointPayment, EntryPointType, EntryPoints, Key, URef,
 };
 
 const RET_AS_CONTRACT: &str = "ret_as_contract";
@@ -30,76 +30,85 @@ pub extern "C" fn call() {
         Parameters::new(),
         CLType::Unit,
         EntryPointAccess::Public,
-        EntryPointType::Contract,
+        EntryPointType::Called,
+        EntryPointPayment::Caller,
     ));
-
     entry_points.add_entry_point(EntryPoint::new(
         RET_AS_SESSION,
         Parameters::new(),
         CLType::Unit,
         EntryPointAccess::Public,
-        EntryPointType::Session,
+        EntryPointType::Called,
+        EntryPointPayment::Caller,
     ));
     entry_points.add_entry_point(EntryPoint::new(
         PUT_KEY_AS_SESSION,
         Parameters::new(),
         CLType::Unit,
         EntryPointAccess::Public,
-        EntryPointType::Contract,
+        EntryPointType::Called,
+        EntryPointPayment::Caller,
     ));
     entry_points.add_entry_point(EntryPoint::new(
         PUT_KEY_AS_CONTRACT,
         Parameters::new(),
         CLType::Unit,
         EntryPointAccess::Public,
-        EntryPointType::Contract,
+        EntryPointType::Called,
+        EntryPointPayment::Caller,
     ));
     entry_points.add_entry_point(EntryPoint::new(
         READ_AS_SESSION,
         Parameters::new(),
         CLType::Unit,
         EntryPointAccess::Public,
-        EntryPointType::Contract,
+        EntryPointType::Called,
+        EntryPointPayment::Caller,
     ));
     entry_points.add_entry_point(EntryPoint::new(
         READ_AS_CONTRACT,
         Parameters::new(),
         CLType::Unit,
         EntryPointAccess::Public,
-        EntryPointType::Contract,
+        EntryPointType::Called,
+        EntryPointPayment::Caller,
     ));
     entry_points.add_entry_point(EntryPoint::new(
         WRITE_AS_SESSION,
         Parameters::new(),
         CLType::Unit,
         EntryPointAccess::Public,
-        EntryPointType::Contract,
+        EntryPointType::Called,
+        EntryPointPayment::Caller,
     ));
     entry_points.add_entry_point(EntryPoint::new(
         WRITE_AS_CONTRACT,
         Parameters::new(),
         CLType::Unit,
         EntryPointAccess::Public,
-        EntryPointType::Contract,
+        EntryPointType::Called,
+        EntryPointPayment::Caller,
     ));
     entry_points.add_entry_point(EntryPoint::new(
         ADD_AS_SESSION,
         Parameters::new(),
         CLType::Unit,
         EntryPointAccess::Public,
-        EntryPointType::Contract,
+        EntryPointType::Called,
+        EntryPointPayment::Caller,
     ));
     entry_points.add_entry_point(EntryPoint::new(
         ADD_AS_CONTRACT,
         Parameters::new(),
         CLType::Unit,
         EntryPointAccess::Public,
-        EntryPointType::Contract,
+        EntryPointType::Called,
+        EntryPointPayment::Caller,
     ));
     let (contract_hash, _contract_version) =
-        storage::new_locked_contract(entry_points, None, None, None);
+        storage::new_locked_contract(entry_points, None, None, None, None);
 
-    runtime::put_key(CONTRACT_HASH_NAME, contract_hash.into());
+    runtime::put_key(CONTRACT_HASH_NAME, Key::contract_entity_key(contract_hash));
 }
 
 #[no_mangle]

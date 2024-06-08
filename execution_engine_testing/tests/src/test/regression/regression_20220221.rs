@@ -1,35 +1,26 @@
-use once_cell::sync::Lazy;
-
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, StepRequestBuilder, UpgradeRequestBuilder,
-    DEFAULT_ACCOUNT_ADDR, DEFAULT_AUCTION_DELAY, DEFAULT_GENESIS_TIMESTAMP_MILLIS,
-    DEFAULT_LOCKED_FUNDS_PERIOD_MILLIS, DEFAULT_PROTOCOL_VERSION, MINIMUM_ACCOUNT_CREATION_BALANCE,
-    PRODUCTION_RUN_GENESIS_REQUEST, TIMESTAMP_MILLIS_INCREMENT,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, StepRequestBuilder, TransferRequestBuilder,
+    UpgradeRequestBuilder, DEFAULT_AUCTION_DELAY, DEFAULT_GENESIS_TIMESTAMP_MILLIS,
+    DEFAULT_LOCKED_FUNDS_PERIOD_MILLIS, DEFAULT_PROTOCOL_VERSION, LOCAL_GENESIS_REQUEST,
+    MINIMUM_ACCOUNT_CREATION_BALANCE, TIMESTAMP_MILLIS_INCREMENT,
 };
-use casper_execution_engine::core::engine_state::{
-    RewardItem, DEFAULT_MAX_RUNTIME_CALL_STACK_HEIGHT,
-};
+use casper_execution_engine::engine_state::DEFAULT_MAX_RUNTIME_CALL_STACK_HEIGHT;
 use casper_types::{
     runtime_args,
-    system::{
-        auction::{self, DelegationRate, BLOCK_REWARD, INITIAL_ERA_ID},
-        mint,
-    },
-    EraId, ProtocolVersion, PublicKey, RuntimeArgs, SecretKey, U256, U512,
+    system::auction::{self, DelegationRate, INITIAL_ERA_ID},
+    EraId, ProtocolVersion, PublicKey, SecretKey, U256, U512,
 };
 
 const VALIDATOR_STAKE: u64 = 1_000_000_000;
 
 const DEFAULT_ACTIVATION_POINT: EraId = EraId::new(1);
 
-static OLD_PROTOCOL_VERSION: Lazy<ProtocolVersion> = Lazy::new(|| *DEFAULT_PROTOCOL_VERSION);
-static NEW_PROTOCOL_VERSION: Lazy<ProtocolVersion> = Lazy::new(|| {
-    ProtocolVersion::from_parts(
-        OLD_PROTOCOL_VERSION.value().major,
-        OLD_PROTOCOL_VERSION.value().minor,
-        OLD_PROTOCOL_VERSION.value().patch + 1,
-    )
-});
+const OLD_PROTOCOL_VERSION: ProtocolVersion = DEFAULT_PROTOCOL_VERSION;
+const NEW_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::from_parts(
+    OLD_PROTOCOL_VERSION.value().major,
+    OLD_PROTOCOL_VERSION.value().minor,
+    OLD_PROTOCOL_VERSION.value().patch + 1,
+);
 
 fn generate_secret_keys() -> impl Iterator<Item = SecretKey> {
     (1u64..).map(|i| {
@@ -52,47 +43,37 @@ fn regression_20220221_should_distribute_to_many_validators() {
 
     let mut public_keys = generate_public_keys();
 
-    let fund_request = ExecuteRequestBuilder::transfer(
-        *DEFAULT_ACCOUNT_ADDR,
-        runtime_args! {
-            mint::ARG_TARGET => PublicKey::System,
-            mint::ARG_AMOUNT => U512::from(MINIMUM_ACCOUNT_CREATION_BALANCE),
-            mint::ARG_ID => <Option<u64>>::None,
-        },
-    )
-    .build();
+    let fund_request =
+        TransferRequestBuilder::new(MINIMUM_ACCOUNT_CREATION_BALANCE, PublicKey::System).build();
 
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let mut upgrade_request = UpgradeRequestBuilder::default()
         .with_new_validator_slots(DEFAULT_MAX_RUNTIME_CALL_STACK_HEIGHT + 1)
         .with_pre_state_hash(builder.get_post_state_hash())
-        .with_current_protocol_version(*OLD_PROTOCOL_VERSION)
-        .with_new_protocol_version(*NEW_PROTOCOL_VERSION)
+        .with_current_protocol_version(OLD_PROTOCOL_VERSION)
+        .with_new_protocol_version(NEW_PROTOCOL_VERSION)
         .with_activation_point(DEFAULT_ACTIVATION_POINT)
         .build();
 
-    builder.upgrade_with_upgrade_request_and_config(None, &mut upgrade_request);
+    builder.upgrade(&mut upgrade_request);
 
-    builder.exec(fund_request).expect_success().commit();
+    builder.transfer_and_commit(fund_request).expect_success();
 
     // Add validators
     for _ in 0..DEFAULT_MAX_RUNTIME_CALL_STACK_HEIGHT {
         let public_key = public_keys.next().unwrap();
 
-        let transfer_request = ExecuteRequestBuilder::transfer(
-            *DEFAULT_ACCOUNT_ADDR,
-            runtime_args! {
-                mint::ARG_TARGET => public_key.to_account_hash(),
-                mint::ARG_AMOUNT => U512::from(MINIMUM_ACCOUNT_CREATION_BALANCE / 10),
-                mint::ARG_ID => <Option<u64>>::None,
-            },
+        let transfer_request = TransferRequestBuilder::new(
+            MINIMUM_ACCOUNT_CREATION_BALANCE / 10,
+            public_key.to_account_hash(),
         )
-        .with_protocol_version(*NEW_PROTOCOL_VERSION)
         .build();
 
-        builder.exec(transfer_request).commit().expect_success();
+        builder
+            .transfer_and_commit(transfer_request)
+            .expect_success();
 
         let delegation_rate: DelegationRate = 10;
 
@@ -108,7 +89,6 @@ fn regression_20220221_should_distribute_to_many_validators() {
             auction::METHOD_ADD_BID,
             session_args,
         )
-        .with_protocol_version(*NEW_PROTOCOL_VERSION)
         .build();
 
         builder.exec(execute_request).expect_success().commit();
@@ -132,9 +112,9 @@ fn regression_20220221_should_distribute_to_many_validators() {
         .expect("should have last element");
     assert!(era_id > INITIAL_ERA_ID, "{}", era_id);
 
-    let mut step_request = StepRequestBuilder::new()
+    let step_request = StepRequestBuilder::new()
         .with_parent_state_hash(builder.get_post_state_hash())
-        .with_protocol_version(*NEW_PROTOCOL_VERSION)
+        .with_protocol_version(NEW_PROTOCOL_VERSION)
         // Next era id is used for returning future era validators, which we don't need to inspect
         // in this test.
         .with_next_era_id(era_id)
@@ -145,14 +125,9 @@ fn regression_20220221_should_distribute_to_many_validators() {
         DEFAULT_MAX_RUNTIME_CALL_STACK_HEIGHT as usize
     );
 
-    for (public_key, _stake) in trusted_era_validators.clone().into_iter() {
-        let reward_amount = BLOCK_REWARD / trusted_era_validators.len() as u64;
-        step_request = step_request.with_reward_item(RewardItem::new(public_key, reward_amount));
-    }
-
     let step_request = step_request.build();
 
-    builder.step(step_request).expect("should run step");
+    assert!(builder.step(step_request).is_success(), "should run step");
 
     builder.run_auction(timestamp_millis, Vec::new());
 }

@@ -22,7 +22,10 @@ use itertools::Itertools;
 use prometheus::Registry;
 use tracing::{debug, error, info, warn};
 
-use casper_types::{EraId, TimeDiff, Timestamp};
+use casper_types::{
+    ActivationPoint, Block, BlockHash, BlockSignaturesV2, EraId, FinalitySignatureV2, TimeDiff,
+    Timestamp,
+};
 
 use crate::{
     components::{
@@ -44,10 +47,7 @@ use crate::{
         EffectBuilder, EffectExt, Effects,
     },
     fatal,
-    types::{
-        ActivationPoint, BlockHash, BlockSignatures, FinalitySignature, MetaBlock, MetaBlockState,
-        NodeId, ValidatorMatrix,
-    },
+    types::{ForwardMetaBlock, MetaBlock, MetaBlockState, NodeId, ValidatorMatrix},
     NodeRng,
 };
 
@@ -265,7 +265,7 @@ impl BlockAccumulator {
     fn register_block<REv>(
         &mut self,
         effect_builder: EffectBuilder<REv>,
-        meta_block: MetaBlock,
+        meta_block: ForwardMetaBlock,
         sender: Option<NodeId>,
     ) -> Effects<Event>
     where
@@ -277,8 +277,8 @@ impl BlockAccumulator {
     {
         let block_hash = meta_block.block.hash();
         debug!(%block_hash, "registering block");
-        let era_id = meta_block.block.header().era_id();
-        let block_height = meta_block.block.header().height();
+        let era_id = meta_block.block.era_id();
+        let block_height = meta_block.block.height();
         if self
             .local_tip
             .as_ref()
@@ -297,7 +297,8 @@ impl BlockAccumulator {
         match acceptor.register_block(meta_block, sender) {
             Ok(_) => match self.validator_matrix.validator_weights(era_id) {
                 Some(evw) => {
-                    let (should_store, faulty_senders) = acceptor.should_store_block(&evw);
+                    let (should_store, faulty_senders) =
+                        acceptor.should_store_block(&evw, self.validator_matrix.chain_name_hash());
                     self.store_block_and_finality_signatures(
                         effect_builder,
                         should_store,
@@ -369,7 +370,7 @@ impl BlockAccumulator {
     fn register_finality_signature<REv>(
         &mut self,
         effect_builder: EffectBuilder<REv>,
-        finality_signature: FinalitySignature,
+        finality_signature: FinalitySignatureV2,
         sender: Option<NodeId>,
     ) -> Effects<Event>
     where
@@ -379,11 +380,11 @@ impl BlockAccumulator {
             + From<FatalAnnouncement>
             + Send,
     {
-        let block_hash = finality_signature.block_hash;
-        let era_id = finality_signature.era_id;
-        self.upsert_acceptor(block_hash, Some(era_id), sender);
+        let block_hash = finality_signature.block_hash();
+        let era_id = finality_signature.era_id();
+        self.upsert_acceptor(*block_hash, Some(era_id), sender);
 
-        let acceptor = match self.block_acceptors.get_mut(&block_hash) {
+        let acceptor = match self.block_acceptors.get_mut(block_hash) {
             Some(acceptor) => acceptor,
             // When there is no acceptor for it, this function returns
             // early, ignoring the signature.
@@ -407,7 +408,8 @@ impl BlockAccumulator {
             ),
             Ok(None) => match self.validator_matrix.validator_weights(era_id) {
                 Some(evw) => {
-                    let (should_store, faulty_senders) = acceptor.should_store_block(&evw);
+                    let (should_store, faulty_senders) =
+                        acceptor.should_store_block(&evw, self.validator_matrix.chain_name_hash());
                     self.store_block_and_finality_signatures(
                         effect_builder,
                         should_store,
@@ -482,8 +484,8 @@ impl BlockAccumulator {
     fn register_stored<REv>(
         &self,
         effect_builder: EffectBuilder<REv>,
-        maybe_meta_block: Option<MetaBlock>,
-        maybe_block_signatures: Option<BlockSignatures>,
+        maybe_meta_block: Option<ForwardMetaBlock>,
+        maybe_block_signatures: Option<BlockSignaturesV2>,
     ) -> Effects<Event>
     where
         REv: From<BlockAccumulatorAnnouncement>
@@ -493,7 +495,11 @@ impl BlockAccumulator {
     {
         let mut effects = Effects::new();
         if let Some(meta_block) = maybe_meta_block {
-            effects.extend(effect_builder.announce_meta_block(meta_block).ignore());
+            effects.extend(
+                effect_builder
+                    .announce_meta_block(meta_block.into())
+                    .ignore(),
+            );
         };
         if let Some(block_signatures) = maybe_block_signatures {
             for finality_signature in block_signatures.finality_signatures() {
@@ -656,15 +662,17 @@ impl BlockAccumulator {
             .set(self.block_children.len().try_into().unwrap_or(i64::MIN));
     }
 
-    fn update_block_children(&mut self, meta_block: &MetaBlock) {
-        if let Some(parent_hash) = meta_block.block.parent() {
-            if self
-                .block_children
-                .insert(*parent_hash, *meta_block.block.hash())
-                .is_none()
-            {
-                self.metrics.known_child_blocks.inc();
-            }
+    fn update_block_children(&mut self, meta_block: &ForwardMetaBlock) {
+        if meta_block.block.is_genesis() {
+            return;
+        }
+        let parent_hash = meta_block.block.parent_hash();
+        if self
+            .block_children
+            .insert(*parent_hash, *meta_block.block.hash())
+            .is_none()
+        {
+            self.metrics.known_child_blocks.inc();
         }
     }
 
@@ -692,9 +700,12 @@ impl BlockAccumulator {
                 // The block wasn't executed yet, so we just put it to storage. An `ExecutedBlock`
                 // event will then re-trigger this flow and eventually mark it complete.
                 let cloned_signatures = block_signatures.clone();
+                let block: Block = (*meta_block.block).clone().into();
                 effect_builder
-                    .put_block_to_storage(Arc::clone(&meta_block.block))
-                    .then(move |_| effect_builder.put_signatures_to_storage(cloned_signatures))
+                    .put_block_to_storage(Arc::new(block))
+                    .then(move |_| {
+                        effect_builder.put_signatures_to_storage(cloned_signatures.into())
+                    })
                     .event(move |_| Event::Stored {
                         maybe_meta_block: Some(meta_block),
                         maybe_block_signatures: Some(block_signatures),
@@ -712,7 +723,7 @@ impl BlockAccumulator {
                 // we mark it as complete.
                 let block_height = meta_block.block.height();
                 effect_builder
-                    .put_signatures_to_storage(block_signatures.clone())
+                    .put_signatures_to_storage(block_signatures.clone().into())
                     .then(move |_| effect_builder.mark_block_completed(block_height))
                     .event(move |_| Event::Stored {
                         maybe_meta_block: Some(meta_block),
@@ -732,11 +743,16 @@ impl BlockAccumulator {
             }
             ShouldStore::SingleSignature(signature) => {
                 debug!(%signature, "storing finality signature");
-                let mut block_signatures =
-                    BlockSignatures::new(signature.block_hash, signature.era_id);
-                block_signatures.insert_proof(signature.public_key.clone(), signature.signature);
+                let mut block_signatures = BlockSignaturesV2::new(
+                    *signature.block_hash(),
+                    signature.block_height(),
+                    signature.era_id(),
+                    signature.chain_name_hash(),
+                );
+                block_signatures
+                    .insert_signature(signature.public_key().clone(), *signature.signature());
                 effect_builder
-                    .put_finality_signature_to_storage(signature)
+                    .put_finality_signature_to_storage(signature.into())
                     .event(move |_| Event::Stored {
                         maybe_meta_block: None,
                         maybe_block_signatures: Some(block_signatures),
@@ -806,7 +822,10 @@ impl<REv: ReactorEvent> Component<REv> for BlockAccumulator {
                 Effects::new()
             }
             Event::ReceivedBlock { block, sender } => {
-                let meta_block = MetaBlock::new(block, vec![], MetaBlockState::new());
+                let meta_block: ForwardMetaBlock =
+                    MetaBlock::new_forward(block, vec![], MetaBlockState::new())
+                        .try_into()
+                        .unwrap();
                 self.register_block(effect_builder, meta_block, Some(sender))
             }
             Event::CreatedFinalitySignature { finality_signature } => {
@@ -820,8 +839,8 @@ impl<REv: ReactorEvent> Component<REv> for BlockAccumulator {
                 self.register_finality_signature(effect_builder, *finality_signature, Some(sender))
             }
             Event::ExecutedBlock { meta_block } => {
-                let height = meta_block.block.header().height();
-                let era_id = meta_block.block.header().era_id();
+                let height = meta_block.block.height();
+                let era_id = meta_block.block.era_id();
                 let effects = self.register_block(effect_builder, meta_block, None);
                 self.register_local_tip(height, era_id);
                 effects
@@ -853,7 +872,7 @@ impl<REv: ReactorEvent> ValidatorBoundComponent<REv> for BlockAccumulator {
             .filter_map(|acceptor| {
                 let era_id = acceptor.era_id()?;
                 let evw = validator_matrix.validator_weights(era_id)?;
-                Some(acceptor.should_store_block(&evw))
+                Some(acceptor.should_store_block(&evw, validator_matrix.chain_name_hash()))
             })
             .collect_vec();
         should_stores

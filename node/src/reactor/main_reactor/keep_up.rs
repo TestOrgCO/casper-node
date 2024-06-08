@@ -1,18 +1,18 @@
-use either::Either;
 use std::{
     fmt::{Display, Formatter},
     time::Duration,
 };
+
+use either::Either;
 use tracing::{debug, error, info, warn};
 
-use casper_execution_engine::core::engine_state::GetEraValidatorsError;
-use casper_types::{EraId, Timestamp};
+use casper_storage::data_access_layer::EraValidatorsRequest;
+use casper_types::{ActivationPoint, BlockHash, BlockHeader, EraId, Timestamp};
 
 use crate::{
     components::{
         block_accumulator::{SyncIdentifier, SyncInstruction},
         block_synchronizer::BlockSynchronizerProgress,
-        contract_runtime::EraValidatorsRequest,
         storage::HighestOrphanedBlockResult,
         sync_leaper,
         sync_leaper::{LeapActivityError, LeapState},
@@ -21,10 +21,7 @@ use crate::{
         requests::BlockSynchronizerRequest, EffectBuilder, EffectExt, EffectResultExt, Effects,
     },
     reactor::main_reactor::{MainEvent, MainReactor},
-    types::{
-        ActivationPoint, BlockHash, BlockHeader, GlobalStatesMetadata, MaxTtl, SyncLeap,
-        SyncLeapIdentifier,
-    },
+    types::{GlobalStatesMetadata, MaxTtl, SyncLeap, SyncLeapIdentifier},
     NodeRng,
 };
 
@@ -180,11 +177,11 @@ impl MainReactor {
     }
 
     fn keep_up_idle(&mut self) -> Either<SyncIdentifier, KeepUpInstruction> {
-        match self.storage.read_highest_complete_block() {
+        match self.storage.get_highest_complete_block() {
             Ok(Some(block)) => Either::Left(SyncIdentifier::LocalTip(
                 *block.hash(),
                 block.height(),
-                block.header().era_id(),
+                block.era_id(),
             )),
             Ok(None) => {
                 // something out of the ordinary occurred; it isn't legit to be in keep up mode
@@ -339,6 +336,7 @@ impl MainReactor {
             let before_era_validators_result = effect_builder
                 .get_era_validators_from_contract_runtime(before_era_validators_request)
                 .await;
+
             let after_era_validators_request = EraValidatorsRequest::new(
                 global_states_metadata.after_state_hash,
                 global_states_metadata.after_protocol_version,
@@ -347,20 +345,16 @@ impl MainReactor {
                 .get_era_validators_from_contract_runtime(after_era_validators_request)
                 .await;
 
-            // Check the results.
-            // A return value of `Ok` means that validators were read successfully.
-            // An `Err` will contain a vector of (block_hash, global_state_hash) pairs to be
-            // fetched by the `GlobalStateSynchronizer`, along with a vector of peers to ask.
-            match (before_era_validators_result, after_era_validators_result) {
-                // Both states were present - return the result.
-                (Ok(before_era_validators), Ok(after_era_validators)) => {
+            let lhs = before_era_validators_result.take_era_validators();
+            let rhs = after_era_validators_result.take_era_validators();
+
+            match (lhs, rhs) {
+                // ++ -> return era validator weights for before & after
+                (Some(before_era_validators), Some(after_era_validators)) => {
                     Ok((before_era_validators, after_era_validators))
                 }
-                // Both were absent - fetch global states for both blocks.
-                (
-                    Err(GetEraValidatorsError::RootNotFound),
-                    Err(GetEraValidatorsError::RootNotFound),
-                ) => Err(vec![
+                // -- => Both were absent - fetch global states for both blocks.
+                (None, None) => Err(vec![
                     (
                         global_states_metadata.before_hash,
                         global_states_metadata.before_state_hash,
@@ -370,26 +364,16 @@ impl MainReactor {
                         global_states_metadata.after_state_hash,
                     ),
                 ]),
-                // The after-block's global state was missing - return the hashes.
-                (Ok(_), Err(GetEraValidatorsError::RootNotFound)) => Err(vec![(
+                // +- => The after-block's global state was missing - return the hashes.
+                (Some(_), None) => Err(vec![(
                     global_states_metadata.after_hash,
                     global_states_metadata.after_state_hash,
                 )]),
-                // The before-block's global state was missing - return the hashes.
-                (Err(GetEraValidatorsError::RootNotFound), Ok(_)) => Err(vec![(
+                // -+ => The before-block's global state was missing - return the hashes.
+                (None, Some(_)) => Err(vec![(
                     global_states_metadata.before_hash,
                     global_states_metadata.before_state_hash,
                 )]),
-                // We got some error other than `RootNotFound` - just log the error and don't
-                // synchronize anything.
-                (before_result, after_result) => {
-                    error!(
-                        ?before_result,
-                        ?after_result,
-                        "couldn't read era validators from global state in block"
-                    );
-                    Err(vec![])
-                }
             }
         }
         .result(
@@ -623,13 +607,9 @@ impl MainReactor {
                     sync_era,
                 }))
             }
-            HighestOrphanedBlockResult::MissingFromBlockHeightIndex(block_height) => Err(format!(
-                "KeepUp: storage is missing historical block height index entry {}",
-                block_height
-            )),
-            HighestOrphanedBlockResult::MissingHeader(block_hash) => Err(format!(
-                "KeepUp: storage is missing historical block header for {}",
-                block_hash
+            HighestOrphanedBlockResult::MissingHeader(height) => Err(format!(
+                "KeepUp: storage is missing historical block header for height {}",
+                height
             )),
             HighestOrphanedBlockResult::MissingHighestSequence => {
                 Err("KeepUp: storage is missing historical highest block sequence".to_string())
@@ -667,7 +647,7 @@ impl MainReactor {
             .map_err(|err| err.to_string())?
             .last()
         {
-            let max_ttl: MaxTtl = self.chainspec.deploy_config.max_ttl.into();
+            let max_ttl: MaxTtl = self.chainspec.transaction_config.max_ttl.into();
             if max_ttl.synced_to_ttl(
                 highest_switch_block_header.timestamp(),
                 highest_orphaned_block_header,
@@ -697,14 +677,14 @@ impl MainReactor {
         {
             match self
                 .storage
-                .read_switch_block_by_era_id(highest_orphaned_block_header.era_id().successor())
+                .get_switch_block_by_era_id(&highest_orphaned_block_header.era_id().successor())
             {
                 Ok(Some(switch)) => {
                     debug!(
                         ?highest_orphaned_block_header,
                         "KeepUp: historical sync in genesis era attempting correction for unmatrixed genesis validators"
                     );
-                    return Ok((switch.header().block_hash(), switch.header().era_id()));
+                    return Ok((*switch.hash(), switch.era_id()));
                 }
                 Ok(None) => return Err(
                     "In genesis era with no genesis validators and missing next era switch block"
@@ -714,7 +694,7 @@ impl MainReactor {
             }
         }
 
-        match self.storage.read_block_header(parent_hash) {
+        match self.storage.read_block_header_by_hash(parent_hash) {
             Ok(Some(parent_block_header)) => {
                 // even if we don't have a complete block (all parts and dependencies)
                 // we may have the parent's block header; if we do we also
@@ -747,5 +727,121 @@ impl MainReactor {
             }
             Err(err) => Err(err.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn synced_to_ttl(
+    latest_switch_block_header: &BlockHeader,
+    highest_orphaned_block_header: &BlockHeader,
+    max_ttl: casper_types::TimeDiff,
+) -> Result<bool, String> {
+    Ok(highest_orphaned_block_header.height() == 0
+        || is_timestamp_at_ttl(
+            latest_switch_block_header.timestamp(),
+            highest_orphaned_block_header.timestamp(),
+            max_ttl,
+        ))
+}
+
+#[cfg(test)]
+fn is_timestamp_at_ttl(
+    latest_switch_block_timestamp: Timestamp,
+    lowest_block_timestamp: Timestamp,
+    max_ttl: casper_types::TimeDiff,
+) -> bool {
+    lowest_block_timestamp < latest_switch_block_timestamp.saturating_sub(max_ttl)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use casper_types::{testing::TestRng, TestBlockBuilder, TimeDiff, Timestamp};
+
+    use crate::reactor::main_reactor::keep_up::{is_timestamp_at_ttl, synced_to_ttl};
+
+    const TWO_DAYS_SECS: u32 = 60 * 60 * 24 * 2;
+    const MAX_TTL: TimeDiff = TimeDiff::from_seconds(86400);
+
+    #[test]
+    fn should_be_at_ttl() {
+        let latest_switch_block_timestamp = Timestamp::from_str("2010-06-15 00:00:00.000").unwrap();
+        let lowest_block_timestamp = Timestamp::from_str("2010-06-10 00:00:00.000").unwrap();
+        let max_ttl = TimeDiff::from_seconds(TWO_DAYS_SECS);
+        assert!(is_timestamp_at_ttl(
+            latest_switch_block_timestamp,
+            lowest_block_timestamp,
+            max_ttl
+        ));
+    }
+
+    #[test]
+    fn should_not_be_at_ttl() {
+        let latest_switch_block_timestamp = Timestamp::from_str("2010-06-15 00:00:00.000").unwrap();
+        let lowest_block_timestamp = Timestamp::from_str("2010-06-14 00:00:00.000").unwrap();
+        let max_ttl = TimeDiff::from_seconds(TWO_DAYS_SECS);
+        assert!(!is_timestamp_at_ttl(
+            latest_switch_block_timestamp,
+            lowest_block_timestamp,
+            max_ttl
+        ));
+    }
+
+    #[test]
+    fn should_detect_ttl_at_the_boundary() {
+        let latest_switch_block_timestamp = Timestamp::from_str("2010-06-15 00:00:00.000").unwrap();
+        let lowest_block_timestamp = Timestamp::from_str("2010-06-12 23:59:59.999").unwrap();
+        let max_ttl = TimeDiff::from_seconds(TWO_DAYS_SECS);
+        assert!(is_timestamp_at_ttl(
+            latest_switch_block_timestamp,
+            lowest_block_timestamp,
+            max_ttl
+        ));
+
+        let latest_switch_block_timestamp = Timestamp::from_str("2010-06-15 00:00:00.000").unwrap();
+        let lowest_block_timestamp = Timestamp::from_str("2010-06-13 00:00:00.000").unwrap();
+        let max_ttl = TimeDiff::from_seconds(TWO_DAYS_SECS);
+        assert!(!is_timestamp_at_ttl(
+            latest_switch_block_timestamp,
+            lowest_block_timestamp,
+            max_ttl
+        ));
+
+        let latest_switch_block_timestamp = Timestamp::from_str("2010-06-15 00:00:00.000").unwrap();
+        let lowest_block_timestamp = Timestamp::from_str("2010-06-13 00:00:00.001").unwrap();
+        let max_ttl = TimeDiff::from_seconds(TWO_DAYS_SECS);
+        assert!(!is_timestamp_at_ttl(
+            latest_switch_block_timestamp,
+            lowest_block_timestamp,
+            max_ttl
+        ));
+    }
+
+    #[test]
+    fn should_detect_ttl_at_genesis() {
+        let rng = &mut TestRng::new();
+
+        let latest_switch_block = TestBlockBuilder::new()
+            .era(100)
+            .height(1000)
+            .switch_block(true)
+            .build_versioned(rng);
+
+        let latest_orphaned_block = TestBlockBuilder::new()
+            .era(0)
+            .height(0)
+            .switch_block(true)
+            .build_versioned(rng);
+
+        assert_eq!(latest_orphaned_block.height(), 0);
+        assert_eq!(
+            synced_to_ttl(
+                &latest_switch_block.clone_header(),
+                &latest_orphaned_block.clone_header(),
+                MAX_TTL
+            ),
+            Ok(true)
+        );
     }
 }

@@ -1,14 +1,15 @@
 use std::time::Duration;
 use tracing::{debug, error, info, trace};
 
-use casper_hashing::Digest;
-use casper_types::{EraId, PublicKey, Timestamp};
+use casper_storage::data_access_layer::GenesisResult;
+use casper_types::{BlockHash, BlockHeader, Digest, EraId, PublicKey, Timestamp};
 
 use crate::{
     components::{
-        block_synchronizer, block_synchronizer::BlockSynchronizerProgress, consensus::EraReport,
-        contract_runtime::ExecutionPreState, diagnostics_port, event_stream_server, network,
-        rest_server, rpc_server, upgrade_watcher,
+        binary_port,
+        block_synchronizer::{self, BlockSynchronizerProgress},
+        contract_runtime::ExecutionPreState,
+        diagnostics_port, event_stream_server, network, rest_server, upgrade_watcher,
     },
     effect::{EffectBuilder, EffectExt, Effects},
     fatal,
@@ -18,7 +19,7 @@ use crate::{
         upgrading_instruction::UpgradingInstruction, utils, validate::ValidateInstruction,
         MainEvent, MainReactor, ReactorState,
     },
-    types::{BlockHash, BlockHeader, BlockPayload, FinalizedBlock, MetaBlockState},
+    types::{BlockPayload, ExecutableBlock, FinalizedBlock, InternalEraReport, MetaBlockState},
     NodeRng,
 };
 
@@ -261,11 +262,11 @@ impl MainReactor {
             return Some(effects);
         }
 
-        // initialize deploy buffer from local storage; on a new node this is nearly a noop
+        // initialize transaction buffer from local storage; on a new node this is nearly a noop
         // but on a restarting node it can be relatively time consuming (depending upon TTL and
-        // how many deploys there have been within the TTL)
+        // how many transactions there have been within the TTL)
         if let Some(effects) = self
-            .deploy_buffer
+            .transaction_buffer
             .initialize_component(effect_builder, &self.storage)
         {
             return Some(effects);
@@ -290,20 +291,22 @@ impl MainReactor {
             return Some(effects);
         }
 
-        // bring up rpc and rest server last to defer complications (such as put_deploy) and
+        // bring up rpc and rest server last to defer complications (such as put_transaction) and
         // for it to be able to answer to /status, which requires various other components to be
         // initialized
         if let Some(effects) = utils::initialize_component(
             effect_builder,
-            &mut self.rpc_server,
-            MainEvent::RpcServer(rpc_server::Event::Initialize),
+            &mut self.rest_server,
+            MainEvent::RestServer(rest_server::Event::Initialize),
         ) {
             return Some(effects);
         }
+
+        // bring up binary port
         if let Some(effects) = utils::initialize_component(
             effect_builder,
-            &mut self.rest_server,
-            MainEvent::RestServer(rest_server::Event::Initialize),
+            &mut self.binary_port,
+            MainEvent::BinaryPort(binary_port::Event::Initialize),
         ) {
             return Some(effects);
         }
@@ -331,10 +334,15 @@ impl MainReactor {
             self.chainspec.clone().as_ref(),
             self.chainspec_raw_bytes.clone().as_ref(),
         ) {
-            Ok(success) => success.post_state_hash,
-            Err(error) => {
-                return GenesisInstruction::Fatal(error.to_string());
+            GenesisResult::Fatal(msg) => {
+                return GenesisInstruction::Fatal(msg);
             }
+            GenesisResult::Failure(err) => {
+                return GenesisInstruction::Fatal(format!("genesis error: {}", err));
+            }
+            GenesisResult::Success {
+                post_state_hash, ..
+            } => post_state_hash,
         };
 
         info!(
@@ -364,20 +372,22 @@ impl MainReactor {
         // have this behavior.
         let genesis_switch_block = FinalizedBlock::new(
             BlockPayload::default(),
-            Some(EraReport::default()),
+            Some(InternalEraReport::default()),
             genesis_timestamp,
             era_id,
             genesis_block_height,
             PublicKey::System,
         );
 
-        // this genesis block has no deploys, and will get
+        // this genesis block has no transactions, and will get
         // handed off to be stored & marked complete after
         // sufficient finality signatures have been collected.
         let effects = effect_builder
             .enqueue_block_for_execution(
-                genesis_switch_block,
-                vec![],
+                ExecutableBlock::from_finalized_block_and_transactions(
+                    genesis_switch_block,
+                    vec![],
+                ),
                 MetaBlockState::new_not_to_be_gossiped(),
             )
             .ignore();
@@ -419,51 +429,27 @@ impl MainReactor {
             }
         };
 
-        let chainspec = &self.chainspec;
-        let chainspec_raw = self.chainspec_raw_bytes.clone();
-
-        info!("{:?}: attempting commit upgrade", self.state);
-        match chainspec.ee_upgrade_config(
+        match self.chainspec.upgrade_config_from_parts(
             *header.state_root_hash(),
             header.protocol_version(),
-            chainspec.protocol_config.activation_point.era_id(),
-            chainspec_raw,
+            self.chainspec.protocol_config.activation_point.era_id(),
+            self.chainspec_raw_bytes.clone(),
         ) {
-            Ok(cfg) => match self.contract_runtime.commit_upgrade(cfg) {
-                Ok(success) => {
-                    let post_state_hash = success.post_state_hash;
-                    info!(
-                        network_name = %chainspec.network_config.name,
-                        %post_state_hash,
-                        "{:?}: committed upgrade", self.state
-                    );
-
-                    let next_block_height = header.height() + 1;
-                    self.initialize_contract_runtime(
-                        next_block_height,
-                        post_state_hash,
-                        header.block_hash(),
-                        header.accumulated_seed(),
-                    );
-
-                    let finalized_block = FinalizedBlock::new(
-                        BlockPayload::default(),
-                        Some(EraReport::default()),
-                        header.timestamp(),
-                        header.next_block_era_id(),
-                        next_block_height,
-                        PublicKey::System,
-                    );
-                    Ok(effect_builder
-                        .enqueue_block_for_execution(
-                            finalized_block,
-                            vec![],
-                            MetaBlockState::new_not_to_be_gossiped(),
+            Ok(cfg) => {
+                let mut effects = Effects::new();
+                let next_block_height = header.height() + 1;
+                effects.extend(
+                    effect_builder
+                        .enqueue_protocol_upgrade(
+                            cfg,
+                            next_block_height,
+                            header.block_hash(),
+                            *header.accumulated_seed(),
                         )
-                        .ignore())
-                }
-                Err(err) => Err(err.to_string()),
-            },
+                        .ignore(),
+                );
+                Ok(effects)
+            }
             Err(msg) => Err(msg),
         }
     }
@@ -493,10 +479,9 @@ impl MainReactor {
 
     pub(super) fn should_commit_upgrade(&self) -> bool {
         match self.get_local_tip_header() {
-            Ok(Some(block_header)) if block_header.is_switch_block() => self
-                .chainspec
-                .protocol_config
-                .is_last_block_before_activation(&block_header),
+            Ok(Some(block_header)) if block_header.is_switch_block() => {
+                block_header.is_last_block_before_activation(&self.chainspec.protocol_config)
+            }
             Ok(Some(_)) | Ok(None) => false,
             Err(msg) => {
                 error!("{:?}: {}", self.state, msg);
@@ -510,7 +495,7 @@ impl MainReactor {
             let block_height = block_header.height();
             let state_root_hash = block_header.state_root_hash();
             let block_hash = block_header.block_hash();
-            let accumulated_seed = block_header.accumulated_seed();
+            let accumulated_seed = *block_header.accumulated_seed();
             self.initialize_contract_runtime(
                 block_height + 1,
                 *state_root_hash,
@@ -588,7 +573,7 @@ impl MainReactor {
     fn get_local_tip_header(&self) -> Result<Option<BlockHeader>, String> {
         match self
             .storage
-            .read_highest_complete_block()
+            .get_highest_complete_block()
             .map_err(|err| format!("Could not read highest complete block: {}", err))?
         {
             Some(local_tip) => Ok(Some(local_tip.take_header())),

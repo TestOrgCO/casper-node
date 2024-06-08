@@ -11,6 +11,21 @@ All notable changes to this project will be documented in this file.  The format
 
 
 
+## Unreleased (2.0.0)
+
+### Added
+* Add `BinaryPort` interface along with the relevant config entries.
+
+### Changed
+* All SSE events are emitted via the `<IP:Port>/events` endpoint. None of the previous ones (`/events/main`, `/events/deploys`, and `/events/sigs`) is available any longer.
+* `DeployBuffer` was renamed to `TransactionBuffer` along with the related metrics.
+
+### Removed
+* Remove the JSON-RPC and speculative execution interfaces.
+* Remove chainspec setting `highway.performance_meter.blocks_to_consider` and the entire `highway.performance_meter` section.
+
+
+
 ## 1.5.6
 
 ### Changed

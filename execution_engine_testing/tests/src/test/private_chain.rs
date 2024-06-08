@@ -1,4 +1,3 @@
-mod burn_fees_and_refund;
 mod fees_accumulation;
 pub mod management;
 mod restricted_auction;
@@ -7,32 +6,23 @@ mod unrestricted_transfers;
 use std::collections::{BTreeMap, BTreeSet};
 
 use casper_engine_test_support::{
-    InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_INITIAL_BALANCE, DEFAULT_AUCTION_DELAY,
+    ChainspecConfig, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_INITIAL_BALANCE, DEFAULT_AUCTION_DELAY,
     DEFAULT_CHAINSPEC_REGISTRY, DEFAULT_GENESIS_CONFIG_HASH, DEFAULT_GENESIS_TIMESTAMP_MILLIS,
     DEFAULT_LOCKED_FUNDS_PERIOD_MILLIS, DEFAULT_PROPOSER_PUBLIC_KEY, DEFAULT_PROTOCOL_VERSION,
     DEFAULT_ROUND_SEIGNIORAGE_RATE, DEFAULT_SYSTEM_CONFIG, DEFAULT_UNBONDING_DELAY,
     DEFAULT_VALIDATOR_SLOTS, DEFAULT_WASM_CONFIG,
 };
-use casper_execution_engine::{
-    core::engine_state::{
-        engine_config::{FeeHandling, RefundHandling},
-        genesis::{AdministratorAccount, ExecConfigBuilder, GenesisValidator},
-        EngineConfig, EngineConfigBuilder, ExecConfig, GenesisAccount, RunGenesisRequest,
-    },
-    shared::{
-        host_function_costs::{HostFunction, HostFunctionCosts},
-        opcode_costs::OpcodeCosts,
-        storage_costs::StorageCosts,
-        wasm_config::{WasmConfig, DEFAULT_MAX_STACK_HEIGHT, DEFAULT_WASM_MAX_MEMORY},
-    },
-};
 use num_rational::Ratio;
 use once_cell::sync::Lazy;
 
+use casper_storage::data_access_layer::GenesisRequest;
 use casper_types::{
-    account::AccountHash, system::auction::DELEGATION_RATE_DENOMINATOR, Motes, PublicKey,
-    SecretKey, U512,
+    account::AccountHash, system::auction::DELEGATION_RATE_DENOMINATOR, AdministratorAccount,
+    CoreConfig, FeeHandling, GenesisAccount, GenesisConfig, GenesisConfigBuilder, GenesisValidator,
+    HostFunction, HostFunctionCosts, MessageLimits, Motes, OpcodeCosts, PublicKey, RefundHandling,
+    SecretKey, StorageCosts, WasmConfig, DEFAULT_MAX_STACK_HEIGHT, DEFAULT_WASM_MAX_MEMORY, U512,
 };
+use tempfile::TempDir;
 
 static VALIDATOR_1_SECRET_KEY: Lazy<SecretKey> =
     Lazy::new(|| SecretKey::secp256k1_from_bytes([244; 32]).unwrap());
@@ -106,17 +96,14 @@ static PRIVATE_CHAIN_GENESIS_VALIDATORS: Lazy<BTreeMap<PublicKey, GenesisValidat
 static PRIVATE_CHAIN_DEFAULT_ACCOUNTS: Lazy<Vec<GenesisAccount>> = Lazy::new(|| {
     let mut default_accounts = Vec::new();
 
-    let proposer_account = GenesisAccount::account(
-        DEFAULT_PROPOSER_PUBLIC_KEY.clone(),
-        Motes::new(U512::zero()),
-        None,
-    );
+    let proposer_account =
+        GenesisAccount::account(DEFAULT_PROPOSER_PUBLIC_KEY.clone(), Motes::zero(), None);
     default_accounts.push(proposer_account);
 
     // One normal account that starts at genesis
     default_accounts.push(GenesisAccount::account(
         ACCOUNT_1_PUBLIC_KEY.clone(),
-        Motes::new(U512::from(DEFAULT_ACCOUNT_INITIAL_BALANCE)),
+        Motes::new(DEFAULT_ACCOUNT_INITIAL_BALANCE),
         None,
     ));
 
@@ -128,7 +115,7 @@ static PRIVATE_CHAIN_DEFAULT_ACCOUNTS: Lazy<Vec<GenesisAccount>> = Lazy::new(|| 
             public_key,
             // Genesis validators for a private network doesn't have balances, but they are part of
             // fixed set of validators
-            balance: Motes::new(U512::zero()),
+            balance: Motes::zero(),
             validator: Some(genesis_validator),
         });
     }
@@ -144,9 +131,10 @@ const PRIVATE_CHAIN_REFUND_HANDLING: RefundHandling = RefundHandling::Refund {
     refund_ratio: Ratio::new_raw(1, 1),
 };
 const PRIVATE_CHAIN_FEE_HANDLING: FeeHandling = FeeHandling::Accumulate;
+const PRIVATE_CHAIN_COMPUTE_REWARDS: bool = false;
 
-static DEFUALT_PRIVATE_CHAIN_EXEC_CONFIG: Lazy<ExecConfig> = Lazy::new(|| {
-    ExecConfigBuilder::default()
+static DEFUALT_PRIVATE_CHAIN_EXEC_CONFIG: Lazy<GenesisConfig> = Lazy::new(|| {
+    GenesisConfigBuilder::default()
         .with_accounts(PRIVATE_CHAIN_DEFAULT_ACCOUNTS.clone())
         .with_wasm_config(*DEFAULT_WASM_CONFIG)
         .with_system_config(*DEFAULT_SYSTEM_CONFIG)
@@ -156,15 +144,13 @@ static DEFUALT_PRIVATE_CHAIN_EXEC_CONFIG: Lazy<ExecConfig> = Lazy::new(|| {
         .with_round_seigniorage_rate(DEFAULT_ROUND_SEIGNIORAGE_RATE)
         .with_unbonding_delay(DEFAULT_UNBONDING_DELAY)
         .with_genesis_timestamp_millis(DEFAULT_GENESIS_TIMESTAMP_MILLIS)
-        .with_refund_handling(PRIVATE_CHAIN_REFUND_HANDLING)
-        .with_fee_handling(PRIVATE_CHAIN_FEE_HANDLING)
         .build()
 });
 
-static DEFAULT_PRIVATE_CHAIN_GENESIS: Lazy<RunGenesisRequest> = Lazy::new(|| {
-    RunGenesisRequest::new(
-        *DEFAULT_GENESIS_CONFIG_HASH,
-        *DEFAULT_PROTOCOL_VERSION,
+static DEFAULT_PRIVATE_CHAIN_GENESIS: Lazy<GenesisRequest> = Lazy::new(|| {
+    GenesisRequest::new(
+        DEFAULT_GENESIS_CONFIG_HASH,
+        DEFAULT_PROTOCOL_VERSION,
         DEFUALT_PRIVATE_CHAIN_EXEC_CONFIG.clone(),
         DEFAULT_CHAINSPEC_REGISTRY.clone(),
     )
@@ -175,24 +161,28 @@ fn custom_setup_genesis_only(
     allow_unrestricted_transfers: bool,
     refund_handling: RefundHandling,
     fee_handling: FeeHandling,
-) -> InMemoryWasmTestBuilder {
-    let engine_config = make_engine_config(
+    compute_rewards: bool,
+) -> LmdbWasmTestBuilder {
+    let engine_config = make_private_chain_config(
         allow_auction_bids,
         allow_unrestricted_transfers,
         refund_handling,
         fee_handling,
+        compute_rewards,
     );
-    let mut builder = InMemoryWasmTestBuilder::new_with_config(engine_config);
-    builder.run_genesis(&DEFAULT_PRIVATE_CHAIN_GENESIS);
+    let data_dir = TempDir::new().expect("should create temp dir");
+    let mut builder = LmdbWasmTestBuilder::new_with_config(data_dir.as_ref(), engine_config);
+    builder.run_genesis(DEFAULT_PRIVATE_CHAIN_GENESIS.clone());
     builder
 }
 
-fn setup_genesis_only() -> InMemoryWasmTestBuilder {
+fn setup_genesis_only() -> LmdbWasmTestBuilder {
     custom_setup_genesis_only(
         PRIVATE_CHAIN_ALLOW_AUCTION_BIDS,
         PRIVATE_CHAIN_ALLOW_UNRESTRICTED_TRANSFERS,
         PRIVATE_CHAIN_REFUND_HANDLING,
         PRIVATE_CHAIN_FEE_HANDLING,
+        PRIVATE_CHAIN_COMPUTE_REWARDS,
     )
 }
 
@@ -210,31 +200,41 @@ fn make_wasm_config() -> WasmConfig {
         OpcodeCosts::default(),
         StorageCosts::default(),
         host_functions,
+        MessageLimits::default(),
     )
 }
 
-fn make_engine_config(
+fn make_private_chain_config(
     allow_auction_bids: bool,
     allow_unrestricted_transfers: bool,
     refund_handling: RefundHandling,
     fee_handling: FeeHandling,
-) -> EngineConfig {
-    let administrator_accounts = PRIVATE_CHAIN_GENESIS_ADMIN_SET.clone();
-    EngineConfigBuilder::default()
-        .with_administrative_accounts(administrator_accounts)
-        .with_allow_auction_bids(allow_auction_bids)
-        .with_allow_unrestricted_transfers(allow_unrestricted_transfers)
-        .with_refund_handling(refund_handling)
-        .with_fee_handling(fee_handling)
-        .with_wasm_config(make_wasm_config())
-        .build()
+    compute_rewards: bool,
+) -> ChainspecConfig {
+    let administrators = PRIVATE_CHAIN_GENESIS_ADMIN_SET.clone();
+    let core_config = CoreConfig {
+        administrators,
+        allow_auction_bids,
+        allow_unrestricted_transfers,
+        refund_handling,
+        fee_handling,
+        compute_rewards,
+        ..Default::default()
+    };
+    let wasm_config = make_wasm_config();
+    ChainspecConfig {
+        core_config,
+        wasm_config,
+        system_costs_config: Default::default(),
+    }
 }
 
-fn private_chain_setup() -> InMemoryWasmTestBuilder {
+fn private_chain_setup() -> LmdbWasmTestBuilder {
     custom_setup_genesis_only(
         PRIVATE_CHAIN_ALLOW_AUCTION_BIDS,
         PRIVATE_CHAIN_ALLOW_UNRESTRICTED_TRANSFERS,
         PRIVATE_CHAIN_REFUND_HANDLING,
         PRIVATE_CHAIN_FEE_HANDLING,
+        PRIVATE_CHAIN_COMPUTE_REWARDS,
     )
 }

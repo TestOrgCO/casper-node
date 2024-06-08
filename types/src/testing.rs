@@ -3,10 +3,14 @@ use std::{
     cell::RefCell,
     cmp, env,
     fmt::{self, Debug, Display, Formatter},
-    thread,
+    iter, thread,
 };
 
-use rand::{self, CryptoRng, Error, Rng, RngCore, SeedableRng};
+use rand::{
+    self,
+    distributions::{uniform::SampleRange, Distribution, Standard},
+    CryptoRng, Error, Rng, RngCore, SeedableRng,
+};
 use rand_pcg::Pcg64Mcg;
 
 thread_local! {
@@ -75,6 +79,23 @@ impl TestRng {
         TestRng { seed, rng }
     }
 
+    /// Returns a random `String` of length within the range specified by `length_range`.
+    pub fn random_string<R: SampleRange<usize>>(&mut self, length_range: R) -> String {
+        let count = self.gen_range(length_range);
+        iter::repeat_with(|| self.gen::<char>())
+            .take(count)
+            .collect()
+    }
+
+    /// Returns a random `Vec` of length within the range specified by `length_range`.
+    pub fn random_vec<R: SampleRange<usize>, T>(&mut self, length_range: R) -> Vec<T>
+    where
+        Standard: Distribution<T>,
+    {
+        let count = self.gen_range(length_range);
+        iter::repeat_with(|| self.gen::<T>()).take(count).collect()
+    }
+
     fn set_flag_or_panic() {
         THIS_THREAD_HAS_RNG.with(|flag| {
             if *flag.borrow() {
@@ -82,6 +103,15 @@ impl TestRng {
             }
             *flag.borrow_mut() = true;
         });
+    }
+
+    /// Creates a child RNG.
+    ///
+    /// The resulting RNG is seeded from `self` deterministically.
+    pub fn create_child(&mut self) -> Self {
+        let seed = self.gen();
+        let rng = Pcg64Mcg::from_seed(seed);
+        TestRng { seed, rng }
     }
 }
 

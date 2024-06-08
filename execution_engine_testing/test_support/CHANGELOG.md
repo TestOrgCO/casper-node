@@ -16,7 +16,7 @@ All notable changes to this project will be documented in this file.  The format
 ### Added
 * Provide `from_chainspec_path` and `max_associated_keys` helper methods on `ChainspecConfig`.
 * Provide functions for converting from `ChainspecConfig` to `EngineConfig`.
-* Provide `try_exec` method on `WamTestBuilder` for fallible contract execution.
+* Provide `try_exec` method on `WasmTestBuilder` for fallible contract execution.
 * Provide `PRODUCTION_CHAINSPEC_PATH`: a lazy static defining the path to the production chainspec.toml file.
 
 
@@ -24,8 +24,8 @@ All notable changes to this project will be documented in this file.  The format
 ## 7.0.0
 
 ### Added
-* Provide `calculate_refund_amount` on `WamTestBuilder`.
-* Provide `upgrade_with_upgrade_request_and_config` on `WamTestBuilder`.
+* Provide `calculate_refund_amount` on `WasmTestBuilder`.
+* Provide `upgrade_with_upgrade_request_and_config` on `WasmTestBuilder`.
 
 
 
@@ -137,7 +137,6 @@ All notable changes to this project will be documented in this file.  The format
     * `AdditiveMapDiff` to allow easy comparison of two AdditiveMaps
     * `StepRequestBuilder` for building a `StepRequest` (generally only used by the execution engine itself)
     * `UpgradeRequestBuilder` for building an `UpgradeRequest` (generally only used by the execution engine itself)
-* Provide `InMemoryWasmTestBuilder` which will be suitable in most cases for testing a smart contract
 * Provide `LmdbWasmTestBuilder` can be used where global state needs to be persisted after execution of a smart contract
 * Provide several helper functions in `utils` module
 * Provide several default consts and statics useful across many test scenarios
@@ -153,6 +152,7 @@ All notable changes to this project will be documented in this file.  The format
     * `TestContext`
     * `TestContextBuilder`
     * `Value`
+* Remove `InMemoryWasmTestBuilder`.
 
 
 

@@ -1,6 +1,3 @@
-// TODO - remove once schemars stops causing warning.
-#![allow(clippy::field_reassign_with_default)]
-
 use std::{
     collections::BTreeMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -11,20 +8,17 @@ use once_cell::sync::Lazy;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use casper_hashing::Digest;
-use casper_types::{EraId, ProtocolVersion, PublicKey, TimeDiff, Timestamp};
-
-use crate::{
-    components::{
-        block_synchronizer::BlockSynchronizerStatus,
-        rpc_server::rpcs::docs::{DocExample, DOCS_EXAMPLE_PROTOCOL_VERSION},
-        upgrade_watcher::NextUpgrade,
-    },
-    reactor::main_reactor::ReactorState,
-    types::{ActivationPoint, Block, BlockHash, NodeId, PeersMap},
+use casper_binary_port::ConsensusStatus;
+use casper_types::{
+    ActivationPoint, AvailableBlockRange, Block, BlockHash, BlockSynchronizerStatus, Digest, EraId,
+    NextUpgrade, Peers, ProtocolVersion, PublicKey, TimeDiff, Timestamp,
 };
 
-use super::AvailableBlockRange;
+use crate::{
+    components::rest_server::{DocExample, DOCS_EXAMPLE_PROTOCOL_VERSION},
+    reactor::main_reactor::ReactorState,
+    types::NodeId,
+};
 
 static CHAINSPEC_INFO: Lazy<ChainspecInfo> = Lazy::new(|| {
     let next_upgrade = NextUpgrade::new(
@@ -43,18 +37,19 @@ static GET_STATUS_RESULT: Lazy<GetStatusResult> = Lazy::new(|| {
     let mut peers = BTreeMap::new();
     peers.insert(*node_id, socket_addr.to_string());
     let status_feed = StatusFeed {
-        last_added_block: Some(Block::doc_example().clone()),
+        last_added_block: Some(Block::example().clone()),
         peers,
         chainspec_info: ChainspecInfo::doc_example().clone(),
-        our_public_signing_key: Some(PublicKey::doc_example().clone()),
+        our_public_signing_key: Some(PublicKey::example().clone()),
         round_length: Some(TimeDiff::from_millis(1 << 16)),
         version: crate::VERSION_STRING.as_str(),
         node_uptime: Duration::from_secs(13),
         reactor_state: ReactorState::Initialize,
         last_progress: Timestamp::from(0),
         available_block_range: AvailableBlockRange::RANGE_0_0,
-        block_sync: BlockSynchronizerStatus::doc_example().clone(),
+        block_sync: BlockSynchronizerStatus::example().clone(),
         starting_state_root_hash: Digest::default(),
+        latest_switch_block_hash: Some(BlockHash::default()),
     };
     GetStatusResult::new(status_feed, DOCS_EXAMPLE_PROTOCOL_VERSION)
 });
@@ -109,6 +104,8 @@ pub struct StatusFeed {
     pub block_sync: BlockSynchronizerStatus,
     /// The state root hash of the lowest block in the available block range.
     pub starting_state_root_hash: Digest,
+    /// The hash of the latest switch block.
+    pub latest_switch_block_hash: Option<BlockHash>,
 }
 
 impl StatusFeed {
@@ -117,18 +114,22 @@ impl StatusFeed {
         last_added_block: Option<Block>,
         peers: BTreeMap<NodeId, String>,
         chainspec_info: ChainspecInfo,
-        consensus_status: Option<(PublicKey, Option<TimeDiff>)>,
+        consensus_status: Option<ConsensusStatus>,
         node_uptime: Duration,
         reactor_state: ReactorState,
         last_progress: Timestamp,
         available_block_range: AvailableBlockRange,
         block_sync: BlockSynchronizerStatus,
         starting_state_root_hash: Digest,
+        latest_switch_block_hash: Option<BlockHash>,
     ) -> Self {
-        let (our_public_signing_key, round_length) = match consensus_status {
-            Some((public_key, round_length)) => (Some(public_key), round_length),
-            None => (None, None),
-        };
+        let (our_public_signing_key, round_length) =
+            consensus_status.map_or((None, None), |consensus_status| {
+                (
+                    Some(consensus_status.validator_public_key().clone()),
+                    consensus_status.round_length(),
+                )
+            });
         StatusFeed {
             last_added_block,
             peers,
@@ -142,6 +143,7 @@ impl StatusFeed {
             available_block_range,
             block_sync,
             starting_state_root_hash,
+            latest_switch_block_hash,
         }
     }
 }
@@ -160,13 +162,18 @@ pub struct MinimalBlockInfo {
 
 impl From<Block> for MinimalBlockInfo {
     fn from(block: Block) -> Self {
+        let proposer = match &block {
+            Block::V1(v1) => v1.proposer().clone(),
+            Block::V2(v2) => v2.proposer().clone(),
+        };
+
         MinimalBlockInfo {
             hash: *block.hash(),
-            timestamp: block.header().timestamp(),
-            era_id: block.header().era_id(),
-            height: block.header().height(),
-            state_root_hash: *block.header().state_root_hash(),
-            creator: block.body().proposer().clone(),
+            timestamp: block.timestamp(),
+            era_id: block.era_id(),
+            height: block.height(),
+            state_root_hash: *block.state_root_hash(),
+            creator: proposer,
         }
     }
 }
@@ -176,7 +183,7 @@ impl From<Block> for MinimalBlockInfo {
 #[serde(deny_unknown_fields)]
 pub struct GetStatusResult {
     /// The node ID and network address of each connected peer.
-    pub peers: PeersMap,
+    pub peers: Peers,
     /// The RPC API version.
     #[schemars(with = "String")]
     pub api_version: ProtocolVersion,
@@ -204,13 +211,15 @@ pub struct GetStatusResult {
     pub available_block_range: AvailableBlockRange,
     /// The status of the block synchronizer builders.
     pub block_sync: BlockSynchronizerStatus,
+    /// The hash of the latest switch block.
+    pub latest_switch_block_hash: Option<BlockHash>,
 }
 
 impl GetStatusResult {
     #[allow(deprecated)]
     pub(crate) fn new(status_feed: StatusFeed, api_version: ProtocolVersion) -> Self {
         GetStatusResult {
-            peers: PeersMap::from(status_feed.peers),
+            peers: Peers::from(status_feed.peers),
             api_version,
             chainspec_name: status_feed.chainspec_info.name,
             starting_state_root_hash: status_feed.starting_state_root_hash,
@@ -223,6 +232,7 @@ impl GetStatusResult {
             last_progress: status_feed.last_progress,
             available_block_range: status_feed.available_block_range,
             block_sync: status_feed.block_sync,
+            latest_switch_block_hash: status_feed.latest_switch_block_hash,
             #[cfg(not(test))]
             build_version: crate::VERSION_STRING.clone(),
 

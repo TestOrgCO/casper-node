@@ -13,9 +13,9 @@ use serde::{de::Error as SerdeError, Deserialize, Deserializer, Serialize, Seria
 
 use crate::{
     account,
-    account::TryFromSliceForAccountHashError,
+    addressable_entity::TryFromSliceForAccountHashError,
     bytesrepr::{Bytes, Error, FromBytes, ToBytes},
-    checksummed_hex, uref, CLType, CLTyped, HashAddr,
+    checksummed_hex, uref, ByteCode, ByteCodeKind, CLType, CLTyped, HashAddr,
 };
 
 const CONTRACT_WASM_MAX_DISPLAY_LEN: usize = 16;
@@ -84,7 +84,7 @@ impl Display for FromStrError {
 
 /// A newtype wrapping a `HashAddr` which is the raw bytes of
 /// the ContractWasmHash
-#[derive(Default, PartialOrd, Ord, PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(PartialOrd, Ord, PartialEq, Eq, Hash, Clone, Copy)]
 #[cfg_attr(feature = "datasize", derive(DataSize))]
 pub struct ContractWasmHash(HashAddr);
 
@@ -117,6 +117,12 @@ impl ContractWasmHash {
             .ok_or(FromStrError::InvalidPrefix)?;
         let bytes = HashAddr::try_from(checksummed_hex::decode(remainder)?.as_ref())?;
         Ok(ContractWasmHash(bytes))
+    }
+}
+
+impl Default for ContractWasmHash {
+    fn default() -> Self {
+        ContractWasmHash::new([0; 32])
     }
 }
 
@@ -233,10 +239,24 @@ impl JsonSchema for ContractWasmHash {
 }
 
 /// A container for contract's WASM bytes.
-#[derive(PartialEq, Eq, Clone, Serialize)]
+#[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[cfg_attr(feature = "datasize", derive(DataSize))]
 pub struct ContractWasm {
     bytes: Bytes,
+}
+
+impl ContractWasm {
+    #[cfg(test)]
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes: bytes.into(),
+        }
+    }
+
+    fn take_bytes(self) -> Vec<u8> {
+        self.bytes.into()
+    }
 }
 
 impl Debug for ContractWasm {
@@ -250,25 +270,6 @@ impl Debug for ContractWasm {
         } else {
             write!(f, "ContractWasm(0x{})", base16::encode_lower(&self.bytes))
         }
-    }
-}
-
-impl ContractWasm {
-    /// Creates new WASM object from bytes.
-    pub fn new(bytes: Vec<u8>) -> Self {
-        ContractWasm {
-            bytes: bytes.into(),
-        }
-    }
-
-    /// Consumes instance of [`ContractWasm`] and returns its bytes.
-    pub fn take_bytes(self) -> Vec<u8> {
-        self.bytes.into()
-    }
-
-    /// Returns a slice of contained WASM bytes.
-    pub fn bytes(&self) -> &[u8] {
-        self.bytes.as_ref()
     }
 }
 
@@ -291,6 +292,12 @@ impl FromBytes for ContractWasm {
     fn from_bytes(bytes: &[u8]) -> Result<(Self, &[u8]), Error> {
         let (bytes, rem1) = FromBytes::from_bytes(bytes)?;
         Ok((ContractWasm { bytes }, rem1))
+    }
+}
+
+impl From<ContractWasm> for ByteCode {
+    fn from(value: ContractWasm) -> Self {
+        ByteCode::new(ByteCodeKind::V1CasperWasm, value.take_bytes())
     }
 }
 

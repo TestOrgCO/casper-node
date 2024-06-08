@@ -1,8 +1,7 @@
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, LOCAL_GENESIS_REQUEST,
 };
-use casper_types::{runtime_args, RuntimeArgs};
+use casper_types::runtime_args;
 
 const CONTRACT_GET_BLOCKTIME: &str = "get_blocktime.wasm";
 const ARG_KNOWN_BLOCK_TIME: &str = "known_block_time";
@@ -19,8 +18,8 @@ fn should_run_get_blocktime_contract() {
     )
     .with_block_time(block_time)
     .build();
-    InMemoryWasmTestBuilder::default()
-        .run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST)
+    LmdbWasmTestBuilder::default()
+        .run_genesis(LOCAL_GENESIS_REQUEST.clone())
         .exec(exec_request)
         .commit()
         .expect_success();

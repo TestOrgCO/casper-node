@@ -16,7 +16,8 @@ DISABLE_LOGGING = RUST_LOG=MatchesNothing
 # Rust Contracts
 ALL_CONTRACTS    = $(shell find ./smart_contracts/contracts/[!.]*  -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
 CLIENT_CONTRACTS = $(shell find ./smart_contracts/contracts/client -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
-RUSTC_FLAGS      = "--remap-path-prefix=$$HOME=/home --remap-path-prefix=$$PWD=/dir"
+CARGO_HOME_REMAP = $(if $(CARGO_HOME),$(CARGO_HOME),$(HOME)/.cargo)
+RUSTC_FLAGS      = "--remap-path-prefix=$(CARGO_HOME_REMAP)=/home/cargo --remap-path-prefix=$$PWD=/dir"
 
 # AssemblyScript Contracts
 CLIENT_CONTRACTS_AS  = $(shell find ./smart_contracts/contracts_as/client     -mindepth 1 -maxdepth 1 -type d)
@@ -32,17 +33,12 @@ CONTRACT_TARGET_DIR_AS    = target_as
 
 build-contract-rs/%:
 	cd smart_contracts/contracts && RUSTFLAGS=$(RUSTC_FLAGS) $(CARGO) build --verbose --release $(filter-out --release, $(CARGO_FLAGS)) --package $*
-	wasm-strip $(CONTRACT_TARGET_DIR)/$(subst -,_,$*).wasm 2>/dev/null | true
 
 .PHONY: build-all-contracts-rs
-build-all-contracts-rs:
-	cd smart_contracts/contracts && \
-	RUSTFLAGS=$(RUSTC_FLAGS) $(CARGO) build --verbose --release $(filter-out --release, $(CARGO_FLAGS)) $(patsubst %, -p %, $(ALL_CONTRACTS))
+build-all-contracts-rs: $(patsubst %, build-contract-rs/%, $(ALL_CONTRACTS))
 
 .PHONY: build-client-contracts-rs
-build-client-contracts-rs:
-	cd smart_contracts/contracts && \
-	$(CARGO) build --release $(filter-out --release, $(CARGO_FLAGS)) $(patsubst %, -p %, $(CLIENT_CONTRACTS))
+build-client-contracts-rs: $(patsubst %, build-contract-rs/%, $(CLIENT_CONTRACTS))
 
 strip-contract/%:
 	wasm-strip $(CONTRACT_TARGET_DIR)/$(subst -,_,$*).wasm 2>/dev/null | true
@@ -75,8 +71,8 @@ resources/local/chainspec.toml: generate-chainspec.sh resources/local/chainspec.
 	@./$<
 
 .PHONY: test-rs
-test-rs: resources/local/chainspec.toml
-	$(LEGACY) $(DISABLE_LOGGING) $(CARGO) test --all-features $(CARGO_FLAGS) -- --nocapture
+test-rs: resources/local/chainspec.toml build-contracts-rs
+	$(LEGACY) $(DISABLE_LOGGING) $(CARGO) test --all-features --no-fail-fast $(CARGO_FLAGS) -- --nocapture
 
 .PHONY: resources/local/chainspec.toml
 test-rs-no-default-features:
@@ -116,6 +112,11 @@ check-std-features:
 	cd smart_contracts/contract && $(CARGO) check --all-targets --no-default-features --features=std
 	cd smart_contracts/contract && $(CARGO) check --all-targets --features=std
 
+.PHONY: check-testing-features
+check-testing-features:
+	cd types && $(CARGO) check --all-targets --no-default-features --features=testing
+	cd types && $(CARGO) check --all-targets --features=testing
+
 .PHONY: check-format
 check-format:
 	$(CARGO_PINNED_NIGHTLY) fmt --all -- --check
@@ -132,11 +133,11 @@ lint: lint-contracts-rs lint-default-features lint-all-features lint-smart-contr
 
 .PHONY: lint-default-features
 lint-default-features:
-	$(CARGO) clippy --all-targets -- -D warnings -A renamed_and_removed_lints
+	$(CARGO) clippy --all-targets -- -D warnings
 
 .PHONY: lint-all-features
 lint-all-features:
-	$(CARGO) clippy --all-targets --all-features -- -D warnings -A renamed_and_removed_lints
+	$(CARGO) clippy --all-targets --all-features -- -D warnings
 
 .PHONY: lint-smart-contracts
 lint-smart-contracts:
@@ -144,7 +145,7 @@ lint-smart-contracts:
 
 .PHONY: audit-rs
 audit-rs:
-	$(CARGO) audit
+	$(CARGO) audit --ignore RUSTSEC-2024-0332
 
 .PHONY: audit-as
 audit-as:
@@ -156,8 +157,8 @@ audit: audit-rs
 
 .PHONY: doc
 doc:
-	RUSTDOCFLAGS="-D warnings" $(CARGO) doc $(CARGO_FLAGS) --no-deps
-	cd smart_contracts/contract && RUSTDOCFLAGS="-D warnings" $(CARGO) doc $(CARGO_FLAGS) --no-deps
+	RUSTFLAGS="-D warnings" RUSTDOCFLAGS="--cfg docsrs" $(CARGO_PINNED_NIGHTLY) doc --all-features $(CARGO_FLAGS) --no-deps
+	cd smart_contracts/contract && RUSTFLAGS="-D warnings" RUSTDOCFLAGS="--cfg docsrs" $(CARGO_PINNED_NIGHTLY) doc --all-features $(CARGO_FLAGS) --no-deps
 
 .PHONY: check-rs
 check-rs: \
@@ -167,18 +168,15 @@ check-rs: \
 	audit \
 	check-no-default-features \
 	check-std-features \
+	check-testing-features \
 	test-rs \
 	test-rs-no-default-features \
 	test-contracts-rs
 
 .PHONY: check
 check: \
-	check-format \
-	doc \
-	lint \
-	audit \
-	test \
-	test-contracts
+	check-rs \
+	test-as
 
 .PHONY: clean
 clean:

@@ -1,7 +1,8 @@
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, LOCAL_GENESIS_REQUEST,
 };
-use casper_execution_engine::core::engine_state::Error;
+use casper_execution_engine::engine_state::Error;
+use casper_storage::tracking_copy::TrackingCopyError;
 use casper_types::{account::AccountHash, RuntimeArgs};
 
 const CONTRACT_EE_532_REGRESSION: &str = "ee_532_regression.wasm";
@@ -9,10 +10,7 @@ const UNKNOWN_ADDR: AccountHash = AccountHash::new([42u8; 32]);
 
 #[ignore]
 #[test]
-fn should_run_ee_532_get_uref_regression_test() {
-    // This test runs a contract that's after every call extends the same key with
-    // more data
-
+fn should_run_ee_532_non_existent_account_regression_test() {
     let exec_request = ExecuteRequestBuilder::standard(
         UNKNOWN_ADDR,
         CONTRACT_EE_532_REGRESSION,
@@ -20,28 +18,28 @@ fn should_run_ee_532_get_uref_regression_test() {
     )
     .build();
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
     builder
-        .run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST)
+        .run_genesis(LOCAL_GENESIS_REQUEST.clone())
         .exec(exec_request)
         .commit();
 
     let deploy_result = builder
         .get_exec_result_owned(0)
-        .expect("should have exec response")
-        .get(0)
-        .cloned()
-        .expect("should have at least one deploy result");
+        .expect("should have exec response");
 
     assert!(
         deploy_result.has_precondition_failure(),
         "expected precondition failure"
     );
 
-    let message = deploy_result.as_error().map(|err| format!("{}", err));
+    let message = deploy_result.error().map(|err| format!("{}", err));
     assert_eq!(
         message,
-        Some(format!("{}", Error::Authorization)),
+        Some(format!(
+            "{}",
+            Error::TrackingCopy(TrackingCopyError::KeyNotFound(UNKNOWN_ADDR.into()))
+        )),
         "expected Error::Authorization"
     )
 }

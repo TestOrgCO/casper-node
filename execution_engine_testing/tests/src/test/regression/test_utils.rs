@@ -1,10 +1,9 @@
-use casper_types::contracts::DEFAULT_ENTRY_POINT_NAME;
+use casper_engine_test_support::DEFAULT_WASM_CONFIG;
+use casper_types::addressable_entity::DEFAULT_ENTRY_POINT_NAME;
 use casper_wasm::{
     builder,
     elements::{Instruction, Instructions},
 };
-
-use casper_engine_test_support::DEFAULT_WASM_CONFIG;
 
 /// Prepare malicious payload with amount of opcodes that could potentially overflow injected gas
 /// counter.

@@ -1,8 +1,8 @@
 use casper_engine_test_support::{
-    utils, ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT,
+    LOCAL_GENESIS_REQUEST,
 };
-use casper_types::{account::AccountHash, runtime_args, Key, RuntimeArgs, StoredValue, U512};
+use casper_types::{account::AccountHash, runtime_args, Key, U512};
 
 const CONTRACT_CREATE: &str = "ee_572_regression_create.wasm";
 const CONTRACT_ESCALATE: &str = "ee_572_regression_escalate.wasm";
@@ -27,7 +27,7 @@ fn should_run_ee_572_regression() {
 
     // This test runs a contract that's after every call extends the same key with
     // more data
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
     let exec_request_1 = ExecuteRequestBuilder::standard(
         *DEFAULT_ACCOUNT_ADDR,
@@ -48,7 +48,7 @@ fn should_run_ee_572_regression() {
 
     // Create Accounts
     builder
-        .run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST)
+        .run_genesis(LOCAL_GENESIS_REQUEST.clone())
         .exec(exec_request_1)
         .expect_success()
         .commit();
@@ -59,35 +59,35 @@ fn should_run_ee_572_regression() {
     builder.exec(exec_request_3).expect_success().commit();
 
     let contract: Key = {
-        let account = match builder.query(None, Key::Account(ACCOUNT_1_ADDR), &[]) {
-            Ok(StoredValue::Account(account)) => account,
-            _ => panic!("Could not find account at: {:?}", ACCOUNT_1_ADDR),
-        };
+        let account = builder
+            .get_entity_with_named_keys_by_account_hash(ACCOUNT_1_ADDR)
+            .expect("must have default contract package");
         *account
             .named_keys()
             .get(CREATE)
             .expect("Could not find contract pointer")
     };
 
+    // Attempt to forge a new URef with escalated privileges
     let exec_request_4 = ExecuteRequestBuilder::standard(
         ACCOUNT_2_ADDR,
         CONTRACT_ESCALATE,
         runtime_args! {
-            "contract_hash" => contract.into_hash().expect("should be hash"),
+            "contract_hash" => contract.into_entity_hash_addr().expect("should be hash"),
         },
     )
     .build();
 
     // Attempt to forge a new URef with escalated privileges
-    let response = builder
+    let _ = builder
         .exec(exec_request_4)
         .get_exec_result_owned(3)
         .expect("should have a response");
 
-    let error_message = utils::get_error_message(response);
+    let error_message = builder.get_error_message().unwrap();
 
     assert!(
-        error_message.contains("ForgedReference"),
+        error_message.contains("Forged reference"),
         "{}",
         error_message
     );

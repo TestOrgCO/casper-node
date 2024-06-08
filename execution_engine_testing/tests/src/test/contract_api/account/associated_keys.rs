@@ -1,13 +1,10 @@
 use once_cell::sync::Lazy;
 
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT,
+    LOCAL_GENESIS_REQUEST,
 };
-use casper_types::{
-    account::{AccountHash, Weight},
-    runtime_args, RuntimeArgs, U512,
-};
+use casper_types::{account::AccountHash, addressable_entity::Weight, runtime_args, U512};
 
 const CONTRACT_ADD_UPDATE_ASSOCIATED_KEY: &str = "add_update_associated_key.wasm";
 const CONTRACT_REMOVE_ASSOCIATED_KEY: &str = "remove_associated_key.wasm";
@@ -22,7 +19,7 @@ static ACCOUNT_1_INITIAL_FUND: Lazy<U512> = Lazy::new(|| *DEFAULT_PAYMENT * 10);
 fn should_manage_associated_key() {
     // for a given account, should be able to add a new associated key and update
     // that key
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
     let exec_request_1 = ExecuteRequestBuilder::standard(
         *DEFAULT_ACCOUNT_ADDR,
@@ -37,21 +34,19 @@ fn should_manage_associated_key() {
     )
     .build();
 
-    builder
-        .run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST)
-        .exec(exec_request_1)
-        .expect_success()
-        .commit();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone()).commit();
+
+    builder.exec(exec_request_1).expect_success().commit();
 
     builder.exec(exec_request_2).expect_success().commit();
 
     let genesis_key = *DEFAULT_ACCOUNT_ADDR;
 
-    let account_1 = builder
-        .get_account(ACCOUNT_1_ADDR)
+    let contract_1 = builder
+        .get_entity_by_account_hash(ACCOUNT_1_ADDR)
         .expect("should have account");
 
-    let gen_weight = account_1
+    let gen_weight = contract_1
         .associated_keys()
         .get(&genesis_key)
         .expect("weight");
@@ -68,11 +63,11 @@ fn should_manage_associated_key() {
 
     builder.exec(exec_request_3).expect_success().commit();
 
-    let account_1 = builder
-        .get_account(ACCOUNT_1_ADDR)
+    let contract_1 = builder
+        .get_entity_by_account_hash(ACCOUNT_1_ADDR)
         .expect("should have account");
 
-    let new_weight = account_1.associated_keys().get(&genesis_key);
+    let new_weight = contract_1.associated_keys().get(&genesis_key);
 
     assert_eq!(new_weight, None, "key should be removed");
 

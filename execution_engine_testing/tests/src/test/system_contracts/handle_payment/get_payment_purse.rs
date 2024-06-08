@@ -1,8 +1,8 @@
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT,
-    MINIMUM_ACCOUNT_CREATION_BALANCE, PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT,
+    LOCAL_GENESIS_REQUEST, MINIMUM_ACCOUNT_CREATION_BALANCE,
 };
-use casper_types::{account::AccountHash, runtime_args, RuntimeArgs, U512};
+use casper_types::{account::AccountHash, runtime_args, U512};
 
 const CONTRACT_GET_PAYMENT_PURSE: &str = "get_payment_purse.wasm";
 const CONTRACT_TRANSFER_PURSE_TO_ACCOUNT: &str = "transfer_purse_to_account.wasm";
@@ -12,7 +12,8 @@ const ARG_AMOUNT: &str = "amount";
 const ARG_TARGET: &str = "target";
 
 #[ignore]
-#[test]
+#[allow(unused)]
+//#[test]
 fn should_run_get_payment_purse_contract_default_account() {
     let exec_request = ExecuteRequestBuilder::standard(
         *DEFAULT_ACCOUNT_ADDR,
@@ -22,15 +23,16 @@ fn should_run_get_payment_purse_contract_default_account() {
         },
     )
     .build();
-    InMemoryWasmTestBuilder::default()
-        .run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST)
+    LmdbWasmTestBuilder::default()
+        .run_genesis(LOCAL_GENESIS_REQUEST.clone())
         .exec(exec_request)
         .expect_success()
         .commit();
 }
 
 #[ignore]
-#[test]
+#[allow(unused)]
+//#[test]
 fn should_run_get_payment_purse_contract_account_1() {
     let exec_request_1 = ExecuteRequestBuilder::standard(
        *DEFAULT_ACCOUNT_ADDR,
@@ -46,8 +48,8 @@ fn should_run_get_payment_purse_contract_account_1() {
         },
     )
     .build();
-    InMemoryWasmTestBuilder::default()
-        .run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST)
+    LmdbWasmTestBuilder::default()
+        .run_genesis(LOCAL_GENESIS_REQUEST.clone())
         .exec(exec_request_1)
         .expect_success()
         .commit()

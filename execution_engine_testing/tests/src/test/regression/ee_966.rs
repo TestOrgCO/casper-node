@@ -3,25 +3,15 @@ use casper_wasm::builder;
 use once_cell::sync::Lazy;
 
 use casper_engine_test_support::{
-    DeployItemBuilder, ExecuteRequestBuilder, InMemoryWasmTestBuilder, UpgradeRequestBuilder,
-    ARG_AMOUNT, DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT, DEFAULT_PROTOCOL_VERSION,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    DeployItemBuilder, ExecuteRequest, ExecuteRequestBuilder, LmdbWasmTestBuilder,
+    UpgradeRequestBuilder, ARG_AMOUNT, DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT,
+    DEFAULT_PROTOCOL_VERSION, LOCAL_GENESIS_REQUEST,
 };
-use casper_execution_engine::{
-    core::{
-        engine_state::{EngineConfigBuilder, Error, ExecuteRequest},
-        execution::Error as ExecError,
-    },
-    shared::{
-        host_function_costs::HostFunctionCosts,
-        opcode_costs::OpcodeCosts,
-        storage_costs::StorageCosts,
-        wasm_config::{WasmConfig, DEFAULT_MAX_STACK_HEIGHT, DEFAULT_WASM_MAX_MEMORY},
-    },
-};
+use casper_execution_engine::{engine_state::Error, execution::ExecError};
 use casper_types::{
-    contracts::DEFAULT_ENTRY_POINT_NAME, runtime_args, ApiError, EraId, ProtocolVersion,
-    RuntimeArgs,
+    addressable_entity::DEFAULT_ENTRY_POINT_NAME, runtime_args, ApiError, EraId, HostFunctionCosts,
+    MessageLimits, OpcodeCosts, ProtocolVersion, RuntimeArgs, StorageCosts, WasmConfig,
+    DEFAULT_MAX_STACK_HEIGHT, DEFAULT_WASM_MAX_MEMORY,
 };
 
 const CONTRACT_EE_966_REGRESSION: &str = "ee_966_regression.wasm";
@@ -35,15 +25,14 @@ static DOUBLED_WASM_MEMORY_LIMIT: Lazy<WasmConfig> = Lazy::new(|| {
         OpcodeCosts::default(),
         StorageCosts::default(),
         HostFunctionCosts::default(),
+        MessageLimits::default(),
     )
 });
-static NEW_PROTOCOL_VERSION: Lazy<ProtocolVersion> = Lazy::new(|| {
-    ProtocolVersion::from_parts(
-        DEFAULT_PROTOCOL_VERSION.value().major,
-        DEFAULT_PROTOCOL_VERSION.value().minor,
-        DEFAULT_PROTOCOL_VERSION.value().patch + 1,
-    )
-});
+const NEW_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::from_parts(
+    DEFAULT_PROTOCOL_VERSION.value().major,
+    DEFAULT_PROTOCOL_VERSION.value().minor,
+    DEFAULT_PROTOCOL_VERSION.value().patch + 1,
+);
 
 fn make_session_code_with_memory_pages(initial_pages: u32, max_pages: Option<u32>) -> Vec<u8> {
     let module = builder::module()
@@ -69,17 +58,17 @@ fn make_session_code_with_memory_pages(initial_pages: u32, max_pages: Option<u32
 }
 
 fn make_request_with_session_bytes(session_code: Vec<u8>) -> ExecuteRequest {
-    let deploy = DeployItemBuilder::new()
+    let deploy_item = DeployItemBuilder::new()
         .with_address(*DEFAULT_ACCOUNT_ADDR)
         .with_session_bytes(session_code, RuntimeArgs::new())
-        .with_empty_payment_bytes(runtime_args! {
+        .with_standard_payment(runtime_args! {
             ARG_AMOUNT => *DEFAULT_PAYMENT
         })
         .with_authorization_keys(&[*DEFAULT_ACCOUNT_ADDR])
         .with_deploy_hash([42; 32])
         .build();
 
-    ExecuteRequestBuilder::new().push_deploy(deploy).build()
+    ExecuteRequestBuilder::from_deploy_item(&deploy_item).build()
 }
 
 #[ignore]
@@ -90,9 +79,9 @@ fn should_run_ee_966_with_zero_min_and_zero_max_memory() {
 
     let exec_request = make_request_with_session_bytes(session_code);
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     builder.exec(exec_request).commit().expect_success();
 }
@@ -104,16 +93,16 @@ fn should_run_ee_966_cant_have_too_much_initial_memory() {
 
     let exec_request = make_request_with_session_bytes(session_code);
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     builder.exec(exec_request).commit();
 
-    let exec_response = &builder
+    let exec_result = &builder
         .get_exec_result_owned(0)
-        .expect("should have exec response")[0];
-    let error = exec_response.as_error().expect("should have error");
+        .expect("should have exec response");
+    let error = exec_result.error().expect("should have error");
     assert_matches!(error, Error::Exec(ExecError::Interpreter(_)));
 }
 
@@ -125,9 +114,9 @@ fn should_run_ee_966_should_request_exactly_maximum() {
 
     let exec_request = make_request_with_session_bytes(session_code);
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     builder.exec(exec_request).commit().expect_success();
 }
@@ -139,9 +128,9 @@ fn should_run_ee_966_should_request_exactly_maximum_as_initial() {
 
     let exec_request = make_request_with_session_bytes(session_code);
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     builder.exec(exec_request).commit().expect_success();
 }
@@ -156,16 +145,16 @@ fn should_run_ee_966_cant_have_too_much_max_memory() {
 
     let exec_request = make_request_with_session_bytes(session_code);
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     builder.exec(exec_request).commit();
 
-    let exec_response = &builder
+    let exec_result = &builder
         .get_exec_result_owned(0)
-        .expect("should have exec response")[0];
-    let error = exec_response.as_error().expect("should have error");
+        .expect("should have exec response");
+    let error = exec_result.error().expect("should have error");
     assert_matches!(error, Error::Exec(ExecError::Interpreter(_)));
 }
 
@@ -179,16 +168,16 @@ fn should_run_ee_966_cant_have_way_too_much_max_memory() {
 
     let exec_request = make_request_with_session_bytes(session_code);
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     builder.exec(exec_request).commit();
 
-    let exec_response = &builder
+    let exec_result = &builder
         .get_exec_result_owned(0)
-        .expect("should have exec response")[0];
-    let error = exec_response.as_error().expect("should have error");
+        .expect("should have exec response");
+    let error = exec_result.error().expect("should have error");
     assert_matches!(error, Error::Exec(ExecError::Interpreter(_)));
 }
 
@@ -200,16 +189,16 @@ fn should_run_ee_966_cant_have_larger_initial_than_max_memory() {
 
     let exec_request = make_request_with_session_bytes(session_code);
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     builder.exec(exec_request).commit();
 
-    let exec_response = &builder
+    let exec_result = &builder
         .get_exec_result_owned(0)
-        .expect("should have exec response")[0];
-    let error = exec_response.as_error().expect("should have error");
+        .expect("should have exec response");
+    let error = exec_result.error().expect("should have error");
     assert_matches!(error, Error::Exec(ExecError::Interpreter(_)));
 }
 
@@ -223,16 +212,16 @@ fn should_run_ee_966_regression_fail_when_growing_mem_past_max() {
     )
     .build();
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     builder.exec(exec_request).commit();
 
-    let results = &builder
+    let exec_result = &builder
         .get_exec_result_owned(0)
-        .expect("should have exec response")[0];
-    let error = results.as_error().expect("should have error");
+        .expect("should have exec response");
+    let error = exec_result.error().expect("should have error");
     assert_matches!(error, Error::Exec(ExecError::Revert(ApiError::OutOfMemory)));
 }
 
@@ -246,9 +235,9 @@ fn should_run_ee_966_regression_when_growing_mem_after_upgrade() {
     )
     .build();
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     builder.exec(exec_request_1).commit();
 
@@ -256,10 +245,10 @@ fn should_run_ee_966_regression_when_growing_mem_after_upgrade() {
     // This request should fail - as it's exceeding default memory limit
     //
 
-    let results = &builder
+    let exec_result = &builder
         .get_exec_result_owned(0)
-        .expect("should have exec response")[0];
-    let error = results.as_error().expect("should have error");
+        .expect("should have exec response");
+    let error = exec_result.error().expect("should have error");
     assert_matches!(error, Error::Exec(ExecError::Revert(ApiError::OutOfMemory)));
 
     //
@@ -267,16 +256,19 @@ fn should_run_ee_966_regression_when_growing_mem_after_upgrade() {
     //
 
     let mut upgrade_request = UpgradeRequestBuilder::new()
-        .with_current_protocol_version(*DEFAULT_PROTOCOL_VERSION)
-        .with_new_protocol_version(*NEW_PROTOCOL_VERSION)
+        .with_current_protocol_version(DEFAULT_PROTOCOL_VERSION)
+        .with_new_protocol_version(NEW_PROTOCOL_VERSION)
         .with_activation_point(DEFAULT_ACTIVATION_POINT)
         .build();
 
-    let engine_config = EngineConfigBuilder::default()
-        .with_wasm_config(*DOUBLED_WASM_MEMORY_LIMIT)
-        .build();
+    let updated_chainspec = builder
+        .chainspec()
+        .clone()
+        .with_wasm_config(*DOUBLED_WASM_MEMORY_LIMIT);
 
-    builder.upgrade_with_upgrade_request_and_config(Some(engine_config), &mut upgrade_request);
+    builder
+        .with_chainspec(updated_chainspec)
+        .upgrade(&mut upgrade_request);
 
     //
     // Now this request is working as the maximum memory limit is doubled.
@@ -287,7 +279,6 @@ fn should_run_ee_966_regression_when_growing_mem_after_upgrade() {
         CONTRACT_EE_966_REGRESSION,
         RuntimeArgs::default(),
     )
-    .with_protocol_version(*NEW_PROTOCOL_VERSION)
     .build();
 
     builder.exec(exec_request_2).commit().expect_success();

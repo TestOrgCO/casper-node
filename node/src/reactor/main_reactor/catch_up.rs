@@ -1,8 +1,9 @@
-use either::Either;
 use std::time::Duration;
+
+use either::Either;
 use tracing::{debug, info, warn};
 
-use casper_types::{TimeDiff, Timestamp};
+use casper_types::{ActivationPoint, BlockHash, TimeDiff, Timestamp};
 
 use crate::{
     components::{
@@ -17,7 +18,7 @@ use crate::{
         main_reactor::{MainEvent, MainReactor},
         wrap_effects,
     },
-    types::{ActivationPoint, BlockHash, NodeId, SyncLeap, SyncLeapIdentifier},
+    types::{NodeId, SyncLeap, SyncLeapIdentifier},
     NodeRng,
 };
 
@@ -99,7 +100,7 @@ impl MainReactor {
 
     fn catch_up_no_trusted_hash(&mut self) -> Either<SyncIdentifier, CatchUpInstruction> {
         // no trusted hash provided, we will attempt to use local tip if available
-        match self.storage.read_highest_complete_block() {
+        match self.storage.get_highest_complete_block() {
             Ok(Some(block)) => {
                 // this is typically a restart scenario; if a node stops and restarts
                 // quickly enough they can rejoin the network from their highest local block
@@ -109,7 +110,7 @@ impl MainReactor {
                 Either::Left(SyncIdentifier::LocalTip(
                     *block.hash(),
                     block.height(),
-                    block.header().era_id(),
+                    block.era_id(),
                 ))
             }
             Ok(None) => {
@@ -183,9 +184,9 @@ impl MainReactor {
     ) -> Either<SyncIdentifier, CatchUpInstruction> {
         // if we have a configured trusted hash and we have the header for that block,
         // use the higher block height of the local tip and the trusted header
-        match self.storage.read_block_header(&trusted_hash) {
+        match self.storage.read_block_header_by_hash(&trusted_hash) {
             Ok(Some(trusted_header)) => {
-                match self.storage.read_highest_complete_block() {
+                match self.storage.get_highest_complete_block() {
                     Ok(Some(block)) => {
                         // leap w/ the higher of local tip or trusted hash
                         let trusted_height = trusted_header.height();
@@ -198,7 +199,7 @@ impl MainReactor {
                             Either::Left(SyncIdentifier::LocalTip(
                                 *block.hash(),
                                 block.height(),
-                                block.header().era_id(),
+                                block.era_id(),
                             ))
                         }
                     }

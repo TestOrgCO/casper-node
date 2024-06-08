@@ -1,10 +1,10 @@
 use once_cell::sync::Lazy;
 
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT,
+    LOCAL_GENESIS_REQUEST,
 };
-use casper_types::{account::AccountHash, runtime_args, RuntimeArgs, U512};
+use casper_types::{account::AccountHash, runtime_args, U512};
 
 const CONTRACT_CREATE_PURSE_01: &str = "create_purse_01.wasm";
 const CONTRACT_TRANSFER_PURSE_TO_ACCOUNT: &str = "transfer_purse_to_account.wasm";
@@ -31,21 +31,21 @@ fn should_insert_account_into_named_keys() {
     )
     .build();
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     builder.exec(exec_request_1).expect_success().commit();
 
     builder.exec(exec_request_2).expect_success().commit();
 
-    let account_1 = builder
-        .get_account(ACCOUNT_1_ADDR)
+    let contract_1 = builder
+        .get_entity_with_named_keys_by_account_hash(ACCOUNT_1_ADDR)
         .expect("should have account");
 
     assert!(
-        account_1.named_keys().contains_key(TEST_PURSE_NAME),
-        "account_1 named_keys should include test purse"
+        contract_1.named_keys().contains(TEST_PURSE_NAME),
+        "contract_1 named_keys should include test purse"
     );
 }
 
@@ -65,9 +65,9 @@ fn should_create_usable_purse() {
         runtime_args! { ARG_PURSE_NAME => TEST_PURSE_NAME },
     )
     .build();
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
     builder
-        .run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST)
+        .run_genesis(LOCAL_GENESIS_REQUEST.clone())
         .exec(exec_request_1)
         .expect_success()
         .commit()
@@ -75,11 +75,11 @@ fn should_create_usable_purse() {
         .expect_success()
         .commit();
 
-    let account_1 = builder
-        .get_account(ACCOUNT_1_ADDR)
+    let contract_1 = builder
+        .get_entity_with_named_keys_by_account_hash(ACCOUNT_1_ADDR)
         .expect("should have account");
 
-    let purse = account_1
+    let purse = contract_1
         .named_keys()
         .get(TEST_PURSE_NAME)
         .expect("should have known key")

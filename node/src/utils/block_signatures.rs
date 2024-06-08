@@ -3,9 +3,7 @@ use std::collections::BTreeMap;
 use num::rational::Ratio;
 use thiserror::Error;
 
-use casper_types::{PublicKey, U512};
-
-use crate::types::BlockSignatures;
+use casper_types::{BlockSignatures, PublicKey, U512};
 
 /// Computes the quorum for the fraction of weight of signatures that will be considered
 /// sufficient. This is the lowest weight so that any two sets of validators with that weight have
@@ -40,7 +38,7 @@ where
     match maybe_block_signatures {
         Some(block_signatures) => {
             let mut bogus_validators = vec![];
-            for (public_key, _) in block_signatures.proofs.iter() {
+            for public_key in block_signatures.signers() {
                 match trusted_validator_weights.get(public_key) {
                     None => {
                         bogus_validators.push(public_key.clone());
@@ -146,10 +144,12 @@ pub(crate) enum BlockSignatureError {
 mod tests {
     use rand::Rng;
 
-    use casper_types::{crypto, testing::TestRng, EraId, SecretKey};
+    use casper_types::{
+        crypto, testing::TestRng, BlockHash, BlockSignaturesV2, ChainNameDigest, EraId,
+        FinalitySignature, SecretKey,
+    };
 
     use super::*;
-    use crate::types::BlockHash;
 
     const TEST_VALIDATOR_WEIGHT: usize = 1;
 
@@ -172,16 +172,18 @@ mod tests {
         rng: &mut TestRng,
         validators: &BTreeMap<PublicKey, SecretKey>,
         n_sigs: usize,
-    ) -> BlockSignatures {
-        let era = rng.gen_range(10..100);
+    ) -> BlockSignaturesV2 {
+        let era_id = EraId::new(rng.gen_range(10..100));
 
         let block_hash = BlockHash::random(rng);
+        let block_height = rng.gen();
+        let chain_name_hash = ChainNameDigest::random(rng);
 
-        let mut sigs = BlockSignatures::new(block_hash, EraId::from(era));
+        let mut sigs = BlockSignaturesV2::new(block_hash, block_height, era_id, chain_name_hash);
 
         for (pub_key, secret_key) in validators.iter().take(n_sigs) {
             let sig = crypto::sign(block_hash, secret_key, pub_key);
-            sigs.insert_proof(pub_key.clone(), sig);
+            sigs.insert_signature(pub_key.clone(), sig);
         }
 
         sigs
@@ -216,7 +218,7 @@ mod tests {
         let result = check_sufficient_block_signatures(
             &validator_weights,
             fault_tolerance_fraction,
-            Some(&insufficient),
+            Some(&BlockSignatures::from(insufficient)),
         );
         assert!(matches!(
             result,
@@ -232,7 +234,7 @@ mod tests {
         let result = check_sufficient_block_signatures(
             &validator_weights,
             fault_tolerance_fraction,
-            Some(&just_enough_weight),
+            Some(&BlockSignatures::from(just_enough_weight)),
         );
         assert!(result.is_ok());
     }
@@ -270,7 +272,7 @@ mod tests {
         let result = check_sufficient_block_signatures_with_quorum_formula(
             &validator_weights,
             fault_tolerance_fraction,
-            Some(&insufficient),
+            Some(&BlockSignatures::from(insufficient)),
             custom_quorum_formula,
         );
         assert!(matches!(
@@ -287,7 +289,7 @@ mod tests {
         let result = check_sufficient_block_signatures_with_quorum_formula(
             &validator_weights,
             fault_tolerance_fraction,
-            Some(&just_enough_weight),
+            Some(&BlockSignatures::from(just_enough_weight)),
             custom_quorum_formula,
         );
         assert!(result.is_ok());
@@ -334,25 +336,41 @@ mod tests {
         let result = check_sufficient_block_signatures(
             &validator_weights,
             fault_tolerance_fraction,
-            Some(&signatures),
+            Some(&BlockSignatures::from(signatures.clone())),
         );
         assert!(result.is_ok());
 
         // Smuggle bogus proofs in.
-        let (_, pub_key_1) = crypto::generate_ed25519_keypair();
-        signatures.insert_proof(
-            pub_key_1.clone(),
-            *signatures.proofs.iter().next().unwrap().1,
+        let block_hash = *signatures.block_hash();
+        let block_height = signatures.block_height();
+        let era_id = signatures.era_id();
+        let chain_name_hash = signatures.chain_name_hash();
+        let finality_sig_1 = FinalitySignature::random_for_block(
+            block_hash,
+            block_height,
+            era_id,
+            chain_name_hash,
+            &mut rng,
         );
-        let (_, pub_key_2) = crypto::generate_ed25519_keypair();
-        signatures.insert_proof(
-            pub_key_2.clone(),
-            *signatures.proofs.iter().next().unwrap().1,
+        signatures.insert_signature(
+            finality_sig_1.public_key().clone(),
+            *finality_sig_1.signature(),
+        );
+        let finality_sig_2 = FinalitySignature::random_for_block(
+            block_hash,
+            block_height,
+            era_id,
+            chain_name_hash,
+            &mut rng,
+        );
+        signatures.insert_signature(
+            finality_sig_2.public_key().clone(),
+            *finality_sig_2.signature(),
         );
         let result = check_sufficient_block_signatures(
             &validator_weights,
             fault_tolerance_fraction,
-            Some(&signatures),
+            Some(&BlockSignatures::from(signatures)),
         );
         let error = result.unwrap_err();
         if let BlockSignatureError::BogusValidators {
@@ -361,8 +379,8 @@ mod tests {
             bogus_validators,
         } = error
         {
-            assert!(bogus_validators.contains(&pub_key_1));
-            assert!(bogus_validators.contains(&pub_key_2));
+            assert!(bogus_validators.contains(finality_sig_1.public_key()));
+            assert!(bogus_validators.contains(finality_sig_2.public_key()));
             assert_eq!(bogus_validators.len(), 2);
         } else {
             panic!("unexpected err: {}", error);

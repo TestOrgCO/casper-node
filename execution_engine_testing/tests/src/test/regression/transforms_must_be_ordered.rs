@@ -1,27 +1,27 @@
-//! Tests whether transforms produced by contracts appear ordered in the transform journal.
+//! Tests whether transforms produced by contracts appear ordered in the effects.
 use core::convert::TryInto;
 
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 use casper_engine_test_support::{
-    DeployItemBuilder, ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    DeployItemBuilder, ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_ADDR,
+    LOCAL_GENESIS_REQUEST,
 };
-use casper_execution_engine::shared::transform::Transform;
 use casper_types::{
-    runtime_args, system::standard_payment, ContractHash, Key, RuntimeArgs, URef, U512,
+    execution::TransformKindV2, runtime_args, system::standard_payment, AddressableEntityHash, Key,
+    URef, U512,
 };
 
 #[ignore]
 #[test]
-fn contract_transforms_should_be_ordered_in_the_journal() {
+fn contract_transforms_should_be_ordered_in_the_effects() {
     // This many URefs will be created in the contract.
     const N_UREFS: u32 = 100;
     // This many operations will be scattered among these URefs.
     const N_OPS: usize = 1000;
 
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let mut rng = StdRng::seed_from_u64(0);
 
@@ -35,12 +35,15 @@ fn contract_transforms_should_be_ordered_in_the_journal() {
     // Installs the contract and creates the URefs, all initialized to `0_i32`.
     builder.exec(execution_request).expect_success().commit();
 
-    let contract_hash: ContractHash = match builder
-        .get_expected_account(*DEFAULT_ACCOUNT_ADDR)
-        .named_keys()["ordered-transforms-contract-hash"]
+    let contract_hash = match builder
+        .get_entity_with_named_keys_by_account_hash(*DEFAULT_ACCOUNT_ADDR)
+        .unwrap()
+        .named_keys()
+        .get("ordered-transforms-contract-hash")
+        .unwrap()
     {
-        Key::Hash(addr) => addr.into(),
-        _ => panic!("Couldn't find orderd-transforms contract."),
+        Key::AddressableEntity(entity_addr) => AddressableEntityHash::new(entity_addr.value()),
+        _ => panic!("Couldn't find ordered-transforms contract."),
     };
 
     // List of operations to be performed by the contract.
@@ -63,9 +66,9 @@ fn contract_transforms_should_be_ordered_in_the_journal() {
     builder
         .exec(
             ExecuteRequestBuilder::from_deploy_item(
-                DeployItemBuilder::new()
+                &DeployItemBuilder::new()
                     .with_address(*DEFAULT_ACCOUNT_ADDR)
-                    .with_empty_payment_bytes(runtime_args! {
+                    .with_standard_payment(runtime_args! {
                         standard_payment::ARG_AMOUNT => U512::from(150_000_000_000_u64),
                     })
                     .with_stored_session_hash(
@@ -85,10 +88,11 @@ fn contract_transforms_should_be_ordered_in_the_journal() {
         .commit();
 
     let exec_result = builder.get_exec_result_owned(1).unwrap();
-    assert_eq!(exec_result.len(), 1);
-    let journal = exec_result[0].execution_journal();
+    let effects = exec_result.effects();
 
-    let contract = builder.get_contract(contract_hash).unwrap();
+    let contract = builder
+        .get_entity_with_named_keys_by_entity_hash(contract_hash)
+        .unwrap();
     let urefs: Vec<URef> = (0..N_UREFS)
         .map(
             |i| match contract.named_keys().get(&format!("uref-{}", i)).unwrap() {
@@ -98,11 +102,11 @@ fn contract_transforms_should_be_ordered_in_the_journal() {
         )
         .collect();
 
-    assert!(journal
-        .clone()
-        .into_iter()
-        .filter_map(|(key, transform)| {
-            let uref = match key {
+    assert!(effects
+        .transforms()
+        .iter()
+        .filter_map(|transform| {
+            let uref = match transform.key() {
                 Key::URef(uref) => uref,
                 _ => return None,
             };
@@ -114,13 +118,13 @@ fn contract_transforms_should_be_ordered_in_the_journal() {
                 Some((i, _)) => i.try_into().unwrap(),
                 None => return None,
             };
-            let (type_index, value): (u8, i32) = match transform {
-                Transform::Identity => (0, 0),
-                Transform::Write(sv) => {
+            let (type_index, value): (u8, i32) = match transform.kind() {
+                TransformKindV2::Identity => (0, 0),
+                TransformKindV2::Write(sv) => {
                     let v: i32 = sv.as_cl_value().unwrap().clone().into_t().unwrap();
                     (1, v)
                 }
-                Transform::AddInt32(v) => (2, v),
+                TransformKindV2::AddInt32(v) => (2, *v),
                 _ => panic!("Invalid transform."),
             };
             Some((type_index, uref_index, value))

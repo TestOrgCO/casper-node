@@ -10,13 +10,14 @@ use std::{
 use datasize::DataSize;
 use serde::Serialize;
 
+use casper_types::FinalitySignatureV2;
+
+use super::AutoClosingResponder;
 use crate::{
     components::{consensus, fetcher::Tag, gossiper},
     protocol::Message,
-    types::{FinalitySignature, NodeId, TrieOrChunkIdDisplay},
+    types::{NodeId, TrieOrChunkIdDisplay},
 };
-
-use super::AutoClosingResponder;
 
 /// An envelope for an incoming message, attaching a sender address.
 #[derive(DataSize, Debug, Serialize)]
@@ -79,7 +80,7 @@ pub(crate) type ConsensusDemand = DemandIncoming<consensus::ConsensusRequestMess
 pub(crate) type TrieResponseIncoming = MessageIncoming<TrieResponse>;
 
 /// A new finality signature arrived over the network.
-pub(crate) type FinalitySignatureIncoming = MessageIncoming<FinalitySignature>;
+pub(crate) type FinalitySignatureIncoming = MessageIncoming<FinalitySignatureV2>;
 
 /// A request for an object out of storage arrived.
 ///
@@ -89,7 +90,7 @@ pub(crate) type FinalitySignatureIncoming = MessageIncoming<FinalitySignature>;
 #[derive(DataSize, Debug, Serialize)]
 #[repr(u8)]
 pub(crate) enum NetRequest {
-    Deploy(Vec<u8>),
+    Transaction(Vec<u8>),
     LegacyDeploy(Vec<u8>),
     Block(Vec<u8>),
     BlockHeader(Vec<u8>),
@@ -102,7 +103,7 @@ pub(crate) enum NetRequest {
 impl Display for NetRequest {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            NetRequest::Deploy(_) => f.write_str("request for deploy"),
+            NetRequest::Transaction(_) => f.write_str("request for transaction"),
             NetRequest::LegacyDeploy(_) => f.write_str("request for legacy deploy"),
             NetRequest::Block(_) => f.write_str("request for block"),
             NetRequest::BlockHeader(_) => f.write_str("request for block header"),
@@ -122,7 +123,7 @@ impl NetRequest {
     /// Returns a unique identifier of the requested object.
     pub(crate) fn unique_id(&self) -> Vec<u8> {
         let id = match self {
-            NetRequest::Deploy(ref id)
+            NetRequest::Transaction(ref id)
             | NetRequest::LegacyDeploy(ref id)
             | NetRequest::Block(ref id)
             | NetRequest::BlockHeader(ref id)
@@ -141,7 +142,7 @@ impl NetRequest {
     /// Returns the tag associated with the request.
     pub(crate) fn tag(&self) -> Tag {
         match self {
-            NetRequest::Deploy(_) => Tag::Deploy,
+            NetRequest::Transaction(_) => Tag::Transaction,
             NetRequest::LegacyDeploy(_) => Tag::LegacyDeploy,
             NetRequest::Block(_) => Tag::Block,
             NetRequest::BlockHeader(_) => Tag::BlockHeader,
@@ -158,7 +159,7 @@ impl NetRequest {
 /// See `NetRequest` for notes.
 #[derive(Debug, Serialize)]
 pub(crate) enum NetResponse {
-    Deploy(Arc<[u8]>),
+    Transaction(Arc<[u8]>),
     LegacyDeploy(Arc<[u8]>),
     Block(Arc<[u8]>),
     BlockHeader(Arc<[u8]>),
@@ -182,7 +183,7 @@ impl DataSize for NetResponse {
 impl Display for NetResponse {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            NetResponse::Deploy(_) => f.write_str("response, deploy"),
+            NetResponse::Transaction(_) => f.write_str("response, transaction"),
             NetResponse::LegacyDeploy(_) => f.write_str("response, legacy deploy"),
             NetResponse::Block(_) => f.write_str("response, block"),
             NetResponse::BlockHeader(_) => f.write_str("response, block header"),
@@ -224,7 +225,7 @@ mod tests {
     fn unique_id_is_unique_across_variants() {
         let inner_id = b"example".to_vec();
 
-        let a = NetRequest::Deploy(inner_id.clone());
+        let a = NetRequest::Transaction(inner_id.clone());
         let b = NetRequest::Block(inner_id);
 
         assert_ne!(a.unique_id(), b.unique_id());

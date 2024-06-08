@@ -4,15 +4,13 @@ use num::Zero;
 use once_cell::sync::Lazy;
 
 use casper_types::{
-    system::auction::DelegationRate, Motes, PublicKey, SecretKey, TimeDiff, Timestamp, U512,
+    system::auction::DelegationRate, AccountConfig, AccountsConfig, ActivationPoint, Chainspec,
+    ChainspecRawBytes, Motes, PublicKey, SecretKey, TimeDiff, Timestamp, ValidatorConfig, U512,
 };
 
 use crate::{
     tls::{KeyFingerprint, Sha512},
-    types::{
-        chainspec::{AccountConfig, AccountsConfig, ValidatorConfig},
-        ActivationPoint, Chainspec, ChainspecRawBytes, NodeId,
-    },
+    types::NodeId,
     utils::Loadable,
 };
 
@@ -51,7 +49,7 @@ where
     let accounts = stakes
         .into_iter()
         .map(|(pk, stake)| {
-            let motes = Motes::new(stake.into());
+            let motes = Motes::new(stake);
             let validator_config = ValidatorConfig::new(motes, DelegationRate::zero());
             AccountConfig::new(pk, motes, Some(validator_config))
         })

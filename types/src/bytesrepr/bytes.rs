@@ -13,6 +13,8 @@ use rand::{
     distributions::{Distribution, Standard},
     Rng,
 };
+#[cfg(feature = "json-schema")]
+use schemars::JsonSchema;
 use serde::{
     de::{Error as SerdeError, SeqAccess, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
@@ -23,7 +25,16 @@ use crate::{checksummed_hex, CLType, CLTyped};
 
 /// A newtype wrapper for bytes that has efficient serialization routines.
 #[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Debug, Default, Hash)]
-pub struct Bytes(Vec<u8>);
+#[cfg_attr(
+    feature = "json-schema",
+    derive(JsonSchema),
+    schemars(description = "Hex-encoded bytes.")
+)]
+#[rustfmt::skip]
+pub struct Bytes(
+    #[cfg_attr(feature = "json-schema", schemars(skip, with = "String"))]
+    Vec<u8>
+);
 
 impl Bytes {
     /// Constructs a new, empty vector of bytes.
@@ -40,6 +51,11 @@ impl Bytes {
     /// Extracts a slice containing the entire vector.
     pub fn as_slice(&self) -> &[u8] {
         self
+    }
+
+    /// Consumes self and returns the inner bytes.
+    pub fn take_inner(self) -> Vec<u8> {
+        self.0
     }
 }
 

@@ -2,6 +2,7 @@
 //! being factored out into standalone crates.
 
 mod block_signatures;
+pub(crate) mod chain_specification;
 mod display_error;
 pub(crate) mod ds;
 mod external;
@@ -16,7 +17,6 @@ pub mod work_queue;
 
 use std::{
     any,
-    cell::RefCell,
     fmt::{self, Debug, Display, Formatter},
     io,
     net::{SocketAddr, ToSocketAddrs},
@@ -38,7 +38,7 @@ use serde::Serialize;
 use thiserror::Error;
 use tracing::{error, warn};
 
-use crate::types::{BlockHeader, NodeId};
+use crate::types::NodeId;
 pub(crate) use block_signatures::{check_sufficient_block_signatures, BlockSignatureError};
 pub(crate) use display_error::display_error;
 #[cfg(test)]
@@ -195,40 +195,6 @@ impl Default for SharedFlag {
     }
 }
 
-/// A display-helper that shows iterators display joined by ",".
-#[derive(Debug)]
-pub(crate) struct DisplayIter<T>(RefCell<Option<T>>);
-
-impl<T> DisplayIter<T> {
-    pub(crate) fn new(item: T) -> Self {
-        DisplayIter(RefCell::new(Some(item)))
-    }
-}
-
-impl<I, T> Display for DisplayIter<I>
-where
-    I: IntoIterator<Item = T>,
-    T: Display,
-{
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        if let Some(src) = self.0.borrow_mut().take() {
-            let mut first = true;
-            for item in src.into_iter().take(f.width().unwrap_or(usize::MAX)) {
-                if first {
-                    first = false;
-                    write!(f, "{}", item)?;
-                } else {
-                    write!(f, ", {}", item)?;
-                }
-            }
-
-            Ok(())
-        } else {
-            write!(f, "DisplayIter:GONE")
-        }
-    }
-}
-
 /// With-directory context.
 ///
 /// Associates a type with a "working directory".
@@ -295,7 +261,7 @@ pub(crate) enum Source {
     /// A client.
     Client,
     /// A client via the speculative_exec server.
-    SpeculativeExec(Box<BlockHeader>),
+    SpeculativeExec,
     /// This node.
     Ourself,
 }
@@ -304,7 +270,7 @@ impl Source {
     #[allow(clippy::wrong_self_convention)]
     pub(crate) fn is_client(&self) -> bool {
         match self {
-            Source::Client | Source::SpeculativeExec(_) => true,
+            Source::Client | Source::SpeculativeExec => true,
             Source::PeerGossiped(_) | Source::Peer(_) | Source::Ourself => false,
         }
     }
@@ -313,7 +279,7 @@ impl Source {
     pub(crate) fn node_id(&self) -> Option<NodeId> {
         match self {
             Source::Peer(node_id) | Source::PeerGossiped(node_id) => Some(*node_id),
-            Source::Client | Source::SpeculativeExec(_) | Source::Ourself => None,
+            Source::Client | Source::SpeculativeExec | Source::Ourself => None,
         }
     }
 }
@@ -324,7 +290,7 @@ impl Display for Source {
             Source::PeerGossiped(node_id) => Display::fmt(node_id, formatter),
             Source::Peer(node_id) => Display::fmt(node_id, formatter),
             Source::Client => write!(formatter, "client"),
-            Source::SpeculativeExec(_) => write!(formatter, "client (speculative exec)"),
+            Source::SpeculativeExec => write!(formatter, "client (speculative exec)"),
             Source::Ourself => write!(formatter, "ourself"),
         }
     }

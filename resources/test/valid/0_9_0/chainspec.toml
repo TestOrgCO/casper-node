@@ -36,20 +36,25 @@ administrators = []
 maximum_round_length = '525seconds'
 reduced_reward_multiplier = [1, 5]
 
-[deploys]
-max_payment_cost = '9'
-max_ttl = '10months'
-max_dependencies = 11
-max_block_size = 12
-max_deploy_size = 1_048_576
-block_max_deploy_count = 125
-block_max_transfer_count = 1000
+[transactions]
+max_ttl = '18hours'
+max_transaction_size = 1_048_576
+block_max_deploy_count = 50
+block_max_native_count = 1250
 block_max_approval_count = 2600
-block_gas_limit = 13
-payment_args_max_length = 1024
-session_args_max_length = 1024
+max_block_size = 10_485_760
+block_gas_limit = 10_000_000_000_000
 native_transfer_minimum_motes = 2_500_000_000
 max_timestamp_leeway = '5 seconds'
+
+[transactions.v1]
+max_args_length = 1024
+
+[transactions.deploy]
+max_payment_cost = '9'
+max_dependencies = 11
+payment_args_max_length = 1024
+session_args_max_length = 1024
 
 [wasm]
 max_memory = 17
@@ -160,6 +165,7 @@ withdraw_validator_reward = 10_000
 read_era_id = 10_000
 activate_bid = 10_000
 redelegate = 10_000
+change_bid_public_key = 10_000
 
 [system_costs.mint_costs]
 mint = 2_500_000_000

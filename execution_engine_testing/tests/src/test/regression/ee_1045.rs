@@ -2,15 +2,14 @@ use num_traits::Zero;
 use std::collections::BTreeSet;
 
 use casper_engine_test_support::{
-    utils, ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNTS, DEFAULT_ACCOUNT_ADDR,
+    utils, ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNTS, DEFAULT_ACCOUNT_ADDR,
     DEFAULT_AUCTION_DELAY, DEFAULT_GENESIS_TIMESTAMP_MILLIS, DEFAULT_LOCKED_FUNDS_PERIOD_MILLIS,
     MINIMUM_ACCOUNT_CREATION_BALANCE, SYSTEM_ADDR, TIMESTAMP_MILLIS_INCREMENT,
 };
-use casper_execution_engine::core::engine_state::genesis::{GenesisAccount, GenesisValidator};
 use casper_types::{
     runtime_args,
     system::auction::{DelegationRate, ARG_VALIDATOR_PUBLIC_KEYS, INITIAL_ERA_ID, METHOD_SLASH},
-    Motes, PublicKey, RuntimeArgs, SecretKey, U512,
+    GenesisAccount, GenesisValidator, Motes, PublicKey, SecretKey, U512,
 };
 use once_cell::sync::Lazy;
 
@@ -53,33 +52,33 @@ const ACCOUNT_4_BOND: u64 = 200_000;
 fn should_run_ee_1045_squash_validators() {
     let account_1 = GenesisAccount::account(
         ACCOUNT_1_PK.clone(),
-        Motes::new(ACCOUNT_1_BALANCE.into()),
+        Motes::new(ACCOUNT_1_BALANCE),
         Some(GenesisValidator::new(
-            Motes::new(ACCOUNT_1_BOND.into()),
+            Motes::new(ACCOUNT_1_BOND),
             DelegationRate::zero(),
         )),
     );
     let account_2 = GenesisAccount::account(
         ACCOUNT_2_PK.clone(),
-        Motes::new(ACCOUNT_2_BALANCE.into()),
+        Motes::new(ACCOUNT_2_BALANCE),
         Some(GenesisValidator::new(
-            Motes::new(ACCOUNT_2_BOND.into()),
+            Motes::new(ACCOUNT_2_BOND),
             DelegationRate::zero(),
         )),
     );
     let account_3 = GenesisAccount::account(
         ACCOUNT_3_PK.clone(),
-        Motes::new(ACCOUNT_3_BALANCE.into()),
+        Motes::new(ACCOUNT_3_BALANCE),
         Some(GenesisValidator::new(
-            Motes::new(ACCOUNT_3_BOND.into()),
+            Motes::new(ACCOUNT_3_BOND),
             DelegationRate::zero(),
         )),
     );
     let account_4 = GenesisAccount::account(
         ACCOUNT_4_PK.clone(),
-        Motes::new(ACCOUNT_4_BALANCE.into()),
+        Motes::new(ACCOUNT_4_BALANCE),
         Some(GenesisValidator::new(
-            Motes::new(ACCOUNT_4_BOND.into()),
+            Motes::new(ACCOUNT_4_BOND),
             DelegationRate::zero(),
         )),
     );
@@ -110,9 +109,9 @@ fn should_run_ee_1045_squash_validators() {
     )
     .build();
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&run_genesis_request);
+    builder.run_genesis(run_genesis_request);
 
     let genesis_validator_weights = builder
         .get_validator_weights(INITIAL_ERA_ID)

@@ -1,20 +1,22 @@
-use criterion::{black_box, criterion_group, criterion_main, Bencher, Criterion};
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     iter,
 };
 
+use criterion::{black_box, criterion_group, criterion_main, Bencher, Criterion};
+
 use casper_types::{
-    account::{Account, AccountHash, ActionThresholds, AssociatedKeys, Weight},
+    account::AccountHash,
+    addressable_entity::{
+        ActionThresholds, AddressableEntity, AssociatedKeys, EntityKind, MessageTopics,
+    },
     bytesrepr::{self, Bytes, FromBytes, ToBytes},
-    contracts::{ContractPackageStatus, NamedKeys},
     system::auction::{Bid, Delegator, EraInfo, SeigniorageAllocation},
-    AccessRights, CLType, CLTyped, CLValue, Contract, ContractHash, ContractPackage,
-    ContractPackageHash, ContractVersionKey, ContractWasmHash, DeployHash, DeployInfo, EntryPoint,
-    EntryPointAccess, EntryPointType, EntryPoints, Group, Key, Parameter, ProtocolVersion,
-    PublicKey, SecretKey, Transfer, TransferAddr, URef, KEY_HASH_LENGTH, TRANSFER_ADDR_LENGTH,
-    U128, U256, U512, UREF_ADDR_LENGTH,
+    AccessRights, AddressableEntityHash, ByteCodeHash, CLTyped, CLValue, DeployHash, DeployInfo,
+    EntityVersionKey, EntityVersions, Gas, Group, Groups, InitiatorAddr, Key, Package, PackageHash,
+    PackageStatus, ProtocolVersion, PublicKey, SecretKey, TransactionHash, TransactionRuntime,
+    TransactionV1Hash, TransferAddr, TransferV2, URef, KEY_HASH_LENGTH, TRANSFER_ADDR_LENGTH, U128,
+    U256, U512, UREF_ADDR_LENGTH,
 };
 
 static KB: usize = 1024;
@@ -446,101 +448,36 @@ fn deserialize_u512(b: &mut Bencher) {
     b.iter(|| U512::from_bytes(black_box(&num_u512_bytes)))
 }
 
-fn sample_account(associated_keys_len: u8, named_keys_len: u8) -> Account {
-    let account_hash = AccountHash::default();
-    let named_keys: NamedKeys = sample_named_keys(named_keys_len);
-    let main_purse = URef::default();
-    let associated_keys = {
-        let mut tmp = AssociatedKeys::new(AccountHash::default(), Weight::new(1));
-        (1..associated_keys_len).for_each(|i| {
-            tmp.add_key(
-                AccountHash::new([i; casper_types::account::ACCOUNT_HASH_LENGTH]),
-                Weight::new(1),
-            )
-            .unwrap()
-        });
-        tmp
-    };
-    let action_thresholds = ActionThresholds::default();
-    Account::new(
-        account_hash,
-        named_keys,
-        main_purse,
-        associated_keys,
-        action_thresholds,
-    )
-}
-
-fn serialize_account(b: &mut Bencher) {
-    let account = sample_account(10, 10);
-    b.iter(|| ToBytes::to_bytes(black_box(&account)));
-}
-
-fn deserialize_account(b: &mut Bencher) {
-    let account = sample_account(10, 10);
-    let account_bytes = Account::to_bytes(&account).unwrap();
-    b.iter(|| Account::from_bytes(black_box(&account_bytes)).unwrap());
-}
-
 fn serialize_contract(b: &mut Bencher) {
-    let contract = sample_contract(10, 10);
+    let contract = sample_contract();
     b.iter(|| ToBytes::to_bytes(black_box(&contract)));
 }
 
 fn deserialize_contract(b: &mut Bencher) {
-    let contract = sample_contract(10, 10);
-    let contract_bytes = Contract::to_bytes(&contract).unwrap();
-    b.iter(|| Contract::from_bytes(black_box(&contract_bytes)).unwrap());
+    let contract = sample_contract();
+    let contract_bytes = AddressableEntity::to_bytes(&contract).unwrap();
+    b.iter(|| AddressableEntity::from_bytes(black_box(&contract_bytes)).unwrap());
 }
 
-fn sample_named_keys(len: u8) -> BTreeMap<String, Key> {
-    (0..len)
-        .map(|i| {
-            (
-                format!("named-key-{}", i),
-                Key::Account(AccountHash::default()),
-            )
-        })
-        .collect()
-}
-
-fn sample_contract(named_keys_len: u8, entry_points_len: u8) -> Contract {
-    let named_keys: NamedKeys = sample_named_keys(named_keys_len);
-
-    let entry_points = {
-        let mut tmp = EntryPoints::default();
-        (1..entry_points_len).for_each(|i| {
-            let args = vec![
-                Parameter::new("first", CLType::U32),
-                Parameter::new("Foo", CLType::U32),
-            ];
-            let entry_point = EntryPoint::new(
-                format!("test-{}", i),
-                args,
-                casper_types::CLType::U512,
-                EntryPointAccess::groups(&["Group 2"]),
-                EntryPointType::Contract,
-            );
-            tmp.add_entry_point(entry_point);
-        });
-        tmp
-    };
-
-    casper_types::contracts::Contract::new(
-        ContractPackageHash::default(),
-        ContractWasmHash::default(),
-        named_keys,
-        entry_points,
+fn sample_contract() -> AddressableEntity {
+    AddressableEntity::new(
+        PackageHash::default(),
+        ByteCodeHash::default(),
         ProtocolVersion::default(),
+        URef::default(),
+        AssociatedKeys::default(),
+        ActionThresholds::default(),
+        MessageTopics::default(),
+        EntityKind::SmartContract(TransactionRuntime::VmCasperV1),
     )
 }
 
-fn contract_version_key_fn(i: u8) -> ContractVersionKey {
-    ContractVersionKey::new(i as u32, i as u32)
+fn contract_version_key_fn(i: u8) -> EntityVersionKey {
+    EntityVersionKey::new(i as u32, i as u32)
 }
 
-fn contract_hash_fn(i: u8) -> ContractHash {
-    ContractHash::new([i; KEY_HASH_LENGTH])
+fn contract_hash_fn(i: u8) -> AddressableEntityHash {
+    AddressableEntityHash::new([i; KEY_HASH_LENGTH])
 }
 
 fn sample_map<K: Ord, V, FK, FV>(key_fn: FK, value_fn: FV, count: u8) -> BTreeMap<K, V>
@@ -576,34 +513,31 @@ fn sample_contract_package(
     contract_versions_len: u8,
     disabled_versions_len: u8,
     groups_len: u8,
-) -> ContractPackage {
-    let access_key = URef::default();
-    let versions = sample_map(
+) -> Package {
+    let versions = EntityVersions::from(sample_map(
         contract_version_key_fn,
         contract_hash_fn,
         contract_versions_len,
-    );
+    ));
     let disabled_versions = sample_set(contract_version_key_fn, disabled_versions_len);
-    let groups = sample_map(sample_group, |_| sample_set(sample_uref, 3), groups_len);
+    let groups = Groups::from(sample_map(
+        sample_group,
+        |_| sample_set(sample_uref, 3),
+        groups_len,
+    ));
 
-    ContractPackage::new(
-        access_key,
-        versions,
-        disabled_versions,
-        groups,
-        ContractPackageStatus::Locked,
-    )
+    Package::new(versions, disabled_versions, groups, PackageStatus::Locked)
 }
 
 fn serialize_contract_package(b: &mut Bencher) {
     let contract = sample_contract_package(5, 1, 5);
-    b.iter(|| ContractPackage::to_bytes(black_box(&contract)));
+    b.iter(|| Package::to_bytes(black_box(&contract)));
 }
 
 fn deserialize_contract_package(b: &mut Bencher) {
     let contract_package = sample_contract_package(5, 1, 5);
-    let contract_bytes = ContractPackage::to_bytes(&contract_package).unwrap();
-    b.iter(|| ContractPackage::from_bytes(black_box(&contract_bytes)).unwrap());
+    let contract_bytes = Package::to_bytes(&contract_package).unwrap();
+    b.iter(|| Package::from_bytes(black_box(&contract_bytes)).unwrap());
 }
 
 fn u32_to_pk(i: u32) -> PublicKey {
@@ -658,28 +592,28 @@ fn deserialize_bid(delegators_len: u32, b: &mut Bencher) {
     b.iter(|| Bid::from_bytes(black_box(&bid_bytes)));
 }
 
-fn sample_transfer() -> Transfer {
-    Transfer::new(
-        DeployHash::default(),
-        AccountHash::default(),
+fn sample_transfer() -> TransferV2 {
+    TransferV2::new(
+        TransactionHash::V1(TransactionV1Hash::default()),
+        InitiatorAddr::AccountHash(AccountHash::default()),
         None,
         URef::default(),
         URef::default(),
         U512::MAX,
-        U512::from_dec_str("123123123123").unwrap(),
+        Gas::new(U512::from_dec_str("123123123123").unwrap()),
         Some(1u64),
     )
 }
 
 fn serialize_transfer(b: &mut Bencher) {
     let transfer = sample_transfer();
-    b.iter(|| Transfer::to_bytes(&transfer));
+    b.iter(|| TransferV2::to_bytes(&transfer));
 }
 
 fn deserialize_transfer(b: &mut Bencher) {
     let transfer = sample_transfer();
     let transfer_bytes = transfer.to_bytes().unwrap();
-    b.iter(|| Transfer::from_bytes(&transfer_bytes));
+    b.iter(|| TransferV2::from_bytes(&transfer_bytes));
 }
 
 fn sample_deploy_info(transfer_len: u16) -> DeployInfo {
@@ -851,8 +785,8 @@ fn bytesrepr_bench(c: &mut Criterion) {
     c.bench_function("deserialize_u256", deserialize_u256);
     c.bench_function("serialize_u512", serialize_u512);
     c.bench_function("deserialize_u512", deserialize_u512);
-    c.bench_function("bytesrepr::serialize_account", serialize_account);
-    c.bench_function("bytesrepr::deserialize_account", deserialize_account);
+    // c.bench_function("bytesrepr::serialize_account", serialize_account);
+    // c.bench_function("bytesrepr::deserialize_account", deserialize_account);
     c.bench_function("bytesrepr::serialize_contract", serialize_contract);
     c.bench_function("bytesrepr::deserialize_contract", deserialize_contract);
     c.bench_function(

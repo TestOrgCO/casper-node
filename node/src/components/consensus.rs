@@ -30,7 +30,7 @@ use derive_more::From;
 use serde::{Deserialize, Serialize};
 use tracing::{info, trace};
 
-use casper_types::{EraId, Timestamp};
+use casper_types::{BlockHash, BlockHeader, EraId, Timestamp};
 
 use crate::{
     components::Component,
@@ -43,15 +43,15 @@ use crate::{
         incoming::{ConsensusDemand, ConsensusMessageIncoming},
         requests::{
             BlockValidationRequest, ChainspecRawBytesRequest, ConsensusRequest,
-            ContractRuntimeRequest, DeployBufferRequest, NetworkInfoRequest, NetworkRequest,
-            StorageRequest,
+            ContractRuntimeRequest, NetworkInfoRequest, NetworkRequest, StorageRequest,
+            TransactionBufferRequest,
         },
         EffectBuilder, EffectExt, Effects,
     },
     failpoints::FailpointActivation,
     protocol::Message,
     reactor::ReactorEvent,
-    types::{BlockHash, BlockHeader, BlockPayload, NodeId},
+    types::{BlockPayload, NodeId},
     NodeRng,
 };
 use protocols::{highway::HighwayProtocol, zug::Zug};
@@ -59,7 +59,7 @@ use traits::Context;
 
 pub use cl_context::ClContext;
 pub(crate) use config::{ChainspecConsensusExt, Config};
-pub(crate) use consensus_protocol::{BlockContext, EraReport, ProposedBlock};
+pub(crate) use consensus_protocol::{BlockContext, ProposedBlock};
 pub(crate) use era_supervisor::{debug::EraDump, EraSupervisor, SerializedMessage};
 #[cfg(test)]
 pub(crate) use highway_core::highway::Vertex as HighwayVertex;
@@ -67,7 +67,6 @@ pub(crate) use leader_sequence::LeaderSequence;
 pub(crate) use protocols::highway::max_rounds_per_era;
 #[cfg(test)]
 pub(crate) use protocols::highway::HighwayMessage;
-pub(crate) use validator_change::ValidatorChange;
 
 const COMPONENT_NAME: &str = "consensus";
 
@@ -314,7 +313,7 @@ pub(crate) trait ReactorEventT:
     + From<NetworkRequest<Message>>
     + From<ConsensusDemand>
     + From<NetworkInfoRequest>
-    + From<DeployBufferRequest>
+    + From<TransactionBufferRequest>
     + From<ConsensusAnnouncement>
     + From<BlockValidationRequest>
     + From<StorageRequest>
@@ -333,7 +332,7 @@ impl<REv> ReactorEventT for REv where
         + From<ConsensusDemand>
         + From<NetworkRequest<Message>>
         + From<NetworkInfoRequest>
-        + From<DeployBufferRequest>
+        + From<TransactionBufferRequest>
         + From<ConsensusAnnouncement>
         + From<BlockValidationRequest>
         + From<StorageRequest>

@@ -1,8 +1,8 @@
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT,
+    LOCAL_GENESIS_REQUEST,
 };
-use casper_types::{account::AccountHash, runtime_args, RuntimeArgs};
+use casper_types::{account::AccountHash, runtime_args};
 
 const CONTRACT_GET_CALLER: &str = "get_caller.wasm";
 const CONTRACT_GET_CALLER_SUBCALL: &str = "get_caller_subcall.wasm";
@@ -12,8 +12,8 @@ const ACCOUNT_1_ADDR: AccountHash = AccountHash::new([1u8; 32]);
 #[ignore]
 #[test]
 fn should_run_get_caller_contract() {
-    InMemoryWasmTestBuilder::default()
-        .run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST)
+    LmdbWasmTestBuilder::default()
+        .run_genesis(LOCAL_GENESIS_REQUEST.clone())
         .exec(
             ExecuteRequestBuilder::standard(
                 *DEFAULT_ACCOUNT_ADDR,
@@ -29,9 +29,9 @@ fn should_run_get_caller_contract() {
 #[ignore]
 #[test]
 fn should_run_get_caller_contract_other_account() {
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     builder
         .exec(
@@ -62,8 +62,8 @@ fn should_run_get_caller_contract_other_account() {
 #[test]
 fn should_run_get_caller_subcall_contract() {
     {
-        let mut builder = InMemoryWasmTestBuilder::default();
-        builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+        let mut builder = LmdbWasmTestBuilder::default();
+        builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
         builder
             .exec(
@@ -78,9 +78,9 @@ fn should_run_get_caller_subcall_contract() {
             .commit();
     }
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
     builder
-        .run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST)
+        .run_genesis(LOCAL_GENESIS_REQUEST.clone())
         .exec(
             ExecuteRequestBuilder::standard(
                 *DEFAULT_ACCOUNT_ADDR,

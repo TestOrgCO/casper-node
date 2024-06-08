@@ -43,13 +43,13 @@ impl MainReactor {
             );
         }
 
-        match self.storage.read_highest_complete_block() {
+        match self.storage.get_highest_complete_block() {
             Ok(Some(highest_complete_block)) => {
                 // If we're lagging behind the rest of the network, fall back out of Validate mode.
                 let sync_identifier = SyncIdentifier::LocalTip(
                     *highest_complete_block.hash(),
                     highest_complete_block.height(),
-                    highest_complete_block.header().era_id(),
+                    highest_complete_block.era_id(),
                 );
 
                 if let SyncInstruction::Leap { .. } =
@@ -58,7 +58,7 @@ impl MainReactor {
                     return ValidateInstruction::CatchUp;
                 }
 
-                if !highest_complete_block.header().is_switch_block() {
+                if !highest_complete_block.is_switch_block() {
                     return ValidateInstruction::CheckLater(
                         "tip is not a switch block, don't change from validate state".to_string(),
                         VALIDATION_STATUS_DELAY_FOR_NON_SWITCH_BLOCK,
@@ -150,7 +150,7 @@ impl MainReactor {
         if let HighestOrphanedBlockResult::Orphan(highest_orphaned_block_header) =
             self.storage.get_highest_orphaned_block_header()
         {
-            let max_ttl: MaxTtl = self.chainspec.deploy_config.max_ttl.into();
+            let max_ttl: MaxTtl = self.chainspec.transaction_config.max_ttl.into();
             if max_ttl.synced_to_ttl(
                 highest_switch_block_header.timestamp(),
                 &highest_orphaned_block_header,

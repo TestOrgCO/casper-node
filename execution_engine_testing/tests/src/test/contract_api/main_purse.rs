@@ -1,8 +1,8 @@
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT,
+    LOCAL_GENESIS_REQUEST,
 };
-use casper_types::{account::AccountHash, runtime_args, Key, RuntimeArgs, StoredValue};
+use casper_types::{account::AccountHash, runtime_args};
 
 const CONTRACT_MAIN_PURSE: &str = "main_purse.wasm";
 const CONTRACT_TRANSFER_PURSE_TO_ACCOUNT: &str = "transfer_purse_to_account.wasm";
@@ -13,17 +13,13 @@ const ARG_AMOUNT: &str = "amount";
 #[ignore]
 #[test]
 fn should_run_main_purse_contract_default_account() {
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    let builder = builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let builder = builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
-    let default_account = if let Ok(StoredValue::Account(account)) =
-        builder.query(None, Key::Account(*DEFAULT_ACCOUNT_ADDR), &[])
-    {
-        account
-    } else {
-        panic!("could not get account")
-    };
+    let default_account = builder
+        .get_entity_by_account_hash(*DEFAULT_ACCOUNT_ADDR)
+        .expect("must have contract for default account");
 
     let exec_request = ExecuteRequestBuilder::standard(
         *DEFAULT_ACCOUNT_ADDR,
@@ -38,7 +34,7 @@ fn should_run_main_purse_contract_default_account() {
 #[ignore]
 #[test]
 fn should_run_main_purse_contract_account_1() {
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
     let exec_request_1 = ExecuteRequestBuilder::standard(
         *DEFAULT_ACCOUNT_ADDR,
@@ -48,13 +44,13 @@ fn should_run_main_purse_contract_account_1() {
     .build();
 
     let builder = builder
-        .run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST)
+        .run_genesis(LOCAL_GENESIS_REQUEST.clone())
         .exec(exec_request_1)
         .expect_success()
         .commit();
 
     let account_1 = builder
-        .get_account(ACCOUNT_1_ADDR)
+        .get_entity_by_account_hash(ACCOUNT_1_ADDR)
         .expect("should get account");
 
     let exec_request_2 = ExecuteRequestBuilder::standard(

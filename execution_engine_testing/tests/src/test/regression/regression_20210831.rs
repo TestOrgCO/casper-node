@@ -1,20 +1,17 @@
 use once_cell::sync::Lazy;
 
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR,
-    DEFAULT_ACCOUNT_PUBLIC_KEY, MINIMUM_ACCOUNT_CREATION_BALANCE, PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, TransferRequestBuilder, DEFAULT_ACCOUNT_ADDR,
+    DEFAULT_ACCOUNT_PUBLIC_KEY, LOCAL_GENESIS_REQUEST, MINIMUM_ACCOUNT_CREATION_BALANCE,
 };
-use casper_execution_engine::core::{
+use casper_execution_engine::{
     engine_state::{engine_config::DEFAULT_MINIMUM_DELEGATION_AMOUNT, Error as CoreError},
-    execution::Error as ExecError,
+    execution::ExecError,
 };
 use casper_types::{
     account::AccountHash,
     runtime_args,
-    system::{
-        auction::{self, DelegationRate},
-        mint,
-    },
+    system::auction::{self, BidsExt, DelegationRate},
     ApiError, PublicKey, RuntimeArgs, SecretKey, U512,
 };
 
@@ -44,62 +41,42 @@ const BID_DELEGATION_RATE: DelegationRate = 42;
 static BID_AMOUNT: Lazy<U512> = Lazy::new(|| U512::from(1_000_000));
 static DELEGATE_AMOUNT: Lazy<U512> = Lazy::new(|| U512::from(500_000));
 
-fn setup() -> InMemoryWasmTestBuilder {
-    let mut builder = InMemoryWasmTestBuilder::default();
+fn setup() -> LmdbWasmTestBuilder {
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
-
-    let id: Option<u64> = None;
-
-    let transfer_args_1 = runtime_args! {
-        mint::ARG_TARGET => *ACCOUNT_1_ADDR,
-        mint::ARG_AMOUNT => U512::from(MINIMUM_ACCOUNT_CREATION_BALANCE),
-        mint::ARG_ID => id,
-    };
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let transfer_request_1 =
-        ExecuteRequestBuilder::transfer(*DEFAULT_ACCOUNT_ADDR, transfer_args_1).build();
+        TransferRequestBuilder::new(MINIMUM_ACCOUNT_CREATION_BALANCE, *ACCOUNT_1_ADDR).build();
 
-    builder.exec(transfer_request_1).expect_success().commit();
-
-    let transfer_args_2 = runtime_args! {
-        mint::ARG_TARGET => *ACCOUNT_2_ADDR,
-        mint::ARG_AMOUNT => U512::from(MINIMUM_ACCOUNT_CREATION_BALANCE),
-        mint::ARG_ID => id,
-    };
+    builder
+        .transfer_and_commit(transfer_request_1)
+        .expect_success();
 
     let transfer_request_2 =
-        ExecuteRequestBuilder::transfer(*DEFAULT_ACCOUNT_ADDR, transfer_args_2).build();
+        TransferRequestBuilder::new(MINIMUM_ACCOUNT_CREATION_BALANCE, *ACCOUNT_2_ADDR).build();
 
-    builder.exec(transfer_request_2).expect_success().commit();
+    builder
+        .transfer_and_commit(transfer_request_2)
+        .expect_success();
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
-
-    let id: Option<u64> = None;
-
-    let transfer_args_1 = runtime_args! {
-        mint::ARG_TARGET => *ACCOUNT_1_ADDR,
-        mint::ARG_AMOUNT => U512::from(MINIMUM_ACCOUNT_CREATION_BALANCE),
-        mint::ARG_ID => id,
-    };
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let transfer_request_1 =
-        ExecuteRequestBuilder::transfer(*DEFAULT_ACCOUNT_ADDR, transfer_args_1).build();
+        TransferRequestBuilder::new(MINIMUM_ACCOUNT_CREATION_BALANCE, *ACCOUNT_1_ADDR).build();
 
-    builder.exec(transfer_request_1).expect_success().commit();
-
-    let transfer_args_2 = runtime_args! {
-        mint::ARG_TARGET => *ACCOUNT_2_ADDR,
-        mint::ARG_AMOUNT => U512::from(MINIMUM_ACCOUNT_CREATION_BALANCE),
-        mint::ARG_ID => id,
-    };
+    builder
+        .transfer_and_commit(transfer_request_1)
+        .expect_success();
 
     let transfer_request_2 =
-        ExecuteRequestBuilder::transfer(*DEFAULT_ACCOUNT_ADDR, transfer_args_2).build();
+        TransferRequestBuilder::new(MINIMUM_ACCOUNT_CREATION_BALANCE, *ACCOUNT_2_ADDR).build();
 
-    builder.exec(transfer_request_2).expect_success().commit();
+    builder
+        .transfer_and_commit(transfer_request_2)
+        .expect_success();
 
     let install_request_1 = ExecuteRequestBuilder::standard(
         *ACCOUNT_2_ADDR,
@@ -251,7 +228,9 @@ fn regression_20210831_should_fail_to_withdraw_bid() {
     builder.exec(add_bid_request).expect_success().commit();
 
     let bids = builder.get_bids();
-    let account_1_bid_before = bids.get(&*ACCOUNT_1_PUBLIC_KEY).expect("should have bid");
+    let account_1_bid_before = bids
+        .validator_bid(&ACCOUNT_1_PUBLIC_KEY)
+        .expect("validator bid should exist");
     assert_eq!(
         builder.get_purse_balance(*account_1_bid_before.bonding_purse()),
         *BID_AMOUNT,
@@ -308,7 +287,9 @@ fn regression_20210831_should_fail_to_withdraw_bid() {
     );
 
     let bids = builder.get_bids();
-    let account_1_bid_after = bids.get(&*ACCOUNT_1_PUBLIC_KEY).expect("should have bid");
+    let account_1_bid_after = bids
+        .validator_bid(&ACCOUNT_1_PUBLIC_KEY)
+        .expect("after bid should exist");
 
     assert_eq!(
         account_1_bid_after, account_1_bid_before,
@@ -350,7 +331,7 @@ fn regression_20210831_should_fail_to_undelegate_bid() {
 
     let bids = builder.get_bids();
     let default_account_bid_before = bids
-        .get(&*DEFAULT_ACCOUNT_PUBLIC_KEY)
+        .validator_bid(&DEFAULT_ACCOUNT_PUBLIC_KEY)
         .expect("should have bid");
     assert_eq!(
         builder.get_purse_balance(*default_account_bid_before.bonding_purse()),
@@ -410,7 +391,7 @@ fn regression_20210831_should_fail_to_undelegate_bid() {
 
     let bids = builder.get_bids();
     let default_account_bid_after = bids
-        .get(&*DEFAULT_ACCOUNT_PUBLIC_KEY)
+        .validator_bid(&DEFAULT_ACCOUNT_PUBLIC_KEY)
         .expect("should have bid");
 
     assert_eq!(
@@ -440,7 +421,7 @@ fn regression_20210831_should_fail_to_activate_bid() {
 
     let bids = builder.get_bids();
     let bid = bids
-        .get(&*DEFAULT_ACCOUNT_PUBLIC_KEY)
+        .validator_bid(&DEFAULT_ACCOUNT_PUBLIC_KEY)
         .expect("should have bid");
     assert!(!bid.inactive());
 
@@ -459,13 +440,13 @@ fn regression_20210831_should_fail_to_activate_bid() {
 
     let bids = builder.get_bids();
     let bid = bids
-        .get(&*DEFAULT_ACCOUNT_PUBLIC_KEY)
-        .expect("should have bid");
-    assert!(bid.inactive());
+        .validator_bid(&DEFAULT_ACCOUNT_PUBLIC_KEY)
+        .expect("should have zero bid");
+    assert!(bid.staked_amount().is_zero());
 
     let sender = *ACCOUNT_2_ADDR;
     let activate_bid_args = runtime_args! {
-        auction::ARG_VALIDATOR_PUBLIC_KEY => DEFAULT_ACCOUNT_PUBLIC_KEY.clone(),
+        auction::ARG_VALIDATOR => DEFAULT_ACCOUNT_PUBLIC_KEY.clone(),
     };
 
     let activate_bid_request_1 = ExecuteRequestBuilder::contract_call_by_hash(
@@ -487,7 +468,6 @@ fn regression_20210831_should_fail_to_activate_bid() {
         error_1
     );
 
-    // ACCOUNT_2 unbonds ACCOUNT_1 through a proxy
     let activate_bid_request_2 = ExecuteRequestBuilder::contract_call_by_name(
         sender,
         CONTRACT_HASH_NAME,

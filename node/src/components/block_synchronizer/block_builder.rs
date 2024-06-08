@@ -11,8 +11,12 @@ use std::{
 use datasize::DataSize;
 use tracing::{debug, error, trace, warn};
 
-use casper_hashing::Digest;
-use casper_types::{EraId, ProtocolVersion, PublicKey, TimeDiff, Timestamp};
+use casper_storage::block_store::types::ApprovalsHashes;
+use casper_types::{
+    execution::ExecutionResult, Block, BlockHash, BlockHeader, BlockSignatures, Digest, EraId,
+    FinalitySignature, LegacyRequiredFinality, ProtocolVersion, PublicKey, TimeDiff, Timestamp,
+    TransactionHash, TransactionId,
+};
 
 use super::{
     block_acquisition::{Acceptance, BlockAcquisitionState, RegisterExecResultsOutcome},
@@ -25,9 +29,7 @@ use super::{
 use crate::{
     components::block_synchronizer::block_builder::latch::Latch,
     types::{
-        chainspec::LegacyRequiredFinality, ApprovalsHashes, Block, BlockExecutionResultsOrChunk,
-        BlockHash, BlockHeader, BlockSignatures, Deploy, DeployHash, DeployId, EraValidatorWeights,
-        FinalitySignature, FinalizedBlock, NodeId, ValidatorMatrix,
+        BlockExecutionResultsOrChunk, EraValidatorWeights, ExecutableBlock, NodeId, ValidatorMatrix,
     },
     NodeRng,
 };
@@ -133,7 +135,7 @@ impl BlockBuilder {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new_from_sync_leap(
-        block_header: &BlockHeader,
+        block_header: BlockHeader,
         maybe_sigs: Option<&BlockSignatures>,
         validator_weights: EraValidatorWeights,
         peers: Vec<NodeId>,
@@ -156,7 +158,7 @@ impl BlockBuilder {
             }
         }
         let acquisition_state = BlockAcquisitionState::HaveWeakFinalitySignatures(
-            Box::new(block_header.clone()),
+            Box::new(block_header),
             signature_acquisition,
         );
         let mut peer_list = PeerList::new(max_simultaneous_peers, peer_refresh_interval);
@@ -269,7 +271,7 @@ impl BlockBuilder {
             | BlockAcquisitionState::HaveApprovalsHashes(_, _, _)
             | BlockAcquisitionState::HaveAllDeploys(_, _)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(_, _)
-            | BlockAcquisitionState::HaveFinalizedBlock(_, _, _, _)
+            | BlockAcquisitionState::HaveExecutableBlock(_, _, _)
             | BlockAcquisitionState::Failed(_, _) => {
                 //TODO: does failed also mean finished?
                 false
@@ -313,16 +315,11 @@ impl BlockBuilder {
         }
     }
 
-    pub(super) fn register_made_finalized_block(
-        &mut self,
-        block: FinalizedBlock,
-        deploys: Vec<Deploy>,
-    ) {
-        if let Err(error) = self.acquisition_state.register_made_finalized_block(
-            self.should_fetch_execution_state,
-            block,
-            deploys,
-        ) {
+    pub(super) fn register_made_executable_block(&mut self, executable_block: ExecutableBlock) {
+        if let Err(error) = self
+            .acquisition_state
+            .register_made_finalized_block(self.should_fetch_execution_state, executable_block)
+        {
             error!(%error, "register finalized block failed");
             self.abort()
         } else {
@@ -472,7 +469,7 @@ impl BlockBuilder {
             | BlockAcquisitionState::HaveAllDeploys(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
             | BlockAcquisitionState::HaveApprovalsHashes(..)
-            | BlockAcquisitionState::HaveFinalizedBlock(..)
+            | BlockAcquisitionState::HaveExecutableBlock(..)
             | BlockAcquisitionState::Failed(..)
             | BlockAcquisitionState::Complete(..) => false,
         }
@@ -507,7 +504,7 @@ impl BlockBuilder {
             | BlockAcquisitionState::HaveAllDeploys(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
             | BlockAcquisitionState::HaveApprovalsHashes(..)
-            | BlockAcquisitionState::HaveFinalizedBlock(..)
+            | BlockAcquisitionState::HaveExecutableBlock(..)
             | BlockAcquisitionState::Failed(..)
             | BlockAcquisitionState::Complete(..) => false,
         }
@@ -515,7 +512,7 @@ impl BlockBuilder {
 
     pub(super) fn register_block(
         &mut self,
-        block: &Block,
+        block: Block,
         maybe_peer: Option<NodeId>,
     ) -> Result<(), Error> {
         let was_waiting_for_block = self.waiting_for_block();
@@ -542,7 +539,7 @@ impl BlockBuilder {
             | BlockAcquisitionState::HaveAllDeploys(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
             | BlockAcquisitionState::HaveApprovalsHashes(..)
-            | BlockAcquisitionState::HaveFinalizedBlock(..)
+            | BlockAcquisitionState::HaveExecutableBlock(..)
             | BlockAcquisitionState::Failed(..)
             | BlockAcquisitionState::Complete(..) => false,
         }
@@ -646,7 +643,7 @@ impl BlockBuilder {
             | BlockAcquisitionState::HaveAllExecutionResults(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
             | BlockAcquisitionState::HaveApprovalsHashes(..)
-            | BlockAcquisitionState::HaveFinalizedBlock(..)
+            | BlockAcquisitionState::HaveExecutableBlock(..)
             | BlockAcquisitionState::Failed(..)
             | BlockAcquisitionState::Complete(..) => false,
         }
@@ -656,7 +653,7 @@ impl BlockBuilder {
         &mut self,
         maybe_peer: Option<NodeId>,
         block_execution_results_or_chunk: BlockExecutionResultsOrChunk,
-    ) -> Result<Option<HashMap<DeployHash, casper_types::ExecutionResult>>, Error> {
+    ) -> Result<Option<HashMap<TransactionHash, ExecutionResult>>, Error> {
         debug!(block_hash=%self.block_hash, "register_fetched_execution_results");
         let was_waiting_for_execution_results = self.waiting_for_execution_results();
         match self.acquisition_state.register_execution_results_or_chunk(
@@ -769,14 +766,14 @@ impl BlockBuilder {
 
     pub(super) fn waiting_for_deploys(&self) -> bool {
         match &self.acquisition_state {
-            BlockAcquisitionState::HaveApprovalsHashes(_, _, deploys) => {
-                deploys.needs_deploy().is_some()
+            BlockAcquisitionState::HaveApprovalsHashes(_, _, transactions) => {
+                transactions.needs_transaction()
             }
-            BlockAcquisitionState::HaveAllExecutionResults(_, _, deploys, checksum)
+            BlockAcquisitionState::HaveAllExecutionResults(_, _, transactions, checksum)
                 if self.should_fetch_execution_state =>
             {
                 if !checksum.is_checkable() {
-                    deploys.needs_deploy().is_some()
+                    transactions.needs_transaction()
                 } else {
                     false
                 }
@@ -789,7 +786,7 @@ impl BlockBuilder {
             | BlockAcquisitionState::HaveAllExecutionResults(..)
             | BlockAcquisitionState::HaveAllDeploys(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
-            | BlockAcquisitionState::HaveFinalizedBlock(..)
+            | BlockAcquisitionState::HaveExecutableBlock(..)
             | BlockAcquisitionState::Failed(..)
             | BlockAcquisitionState::Complete(..) => false,
         }
@@ -797,13 +794,13 @@ impl BlockBuilder {
 
     pub(super) fn register_deploy(
         &mut self,
-        deploy_id: DeployId,
+        txn_id: TransactionId,
         maybe_peer: Option<NodeId>,
     ) -> Result<(), Error> {
         let was_waiting_for_deploys = self.waiting_for_deploys();
         let acceptance = self
             .acquisition_state
-            .register_deploy(deploy_id, self.should_fetch_execution_state);
+            .register_deploy(txn_id, self.should_fetch_execution_state);
         self.handle_acceptance(maybe_peer, acceptance, was_waiting_for_deploys)
     }
 

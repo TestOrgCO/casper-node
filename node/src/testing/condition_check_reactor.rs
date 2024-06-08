@@ -6,12 +6,14 @@ use std::{
 use futures::future::BoxFuture;
 use prometheus::Registry;
 
+use casper_types::{Chainspec, ChainspecRawBytes};
+
 use super::network::NetworkedReactor;
 use crate::{
-    components::network::Identity as NetworkIdentity,
+    components::{network::Identity as NetworkIdentity, ComponentState},
     effect::{EffectBuilder, Effects},
     reactor::{EventQueueHandle, Finalize, Reactor},
-    types::{Chainspec, ChainspecRawBytes, NodeId},
+    types::NodeId,
     NodeRng,
 };
 
@@ -102,6 +104,10 @@ impl<R: Reactor> Reactor for ConditionCheckReactor<R> {
             self.condition_checker = None;
         }
         self.reactor.dispatch_event(effect_builder, rng, event)
+    }
+
+    fn get_component_state(&self, name: &str) -> Option<&ComponentState> {
+        self.inner().get_component_state(name)
     }
 }
 

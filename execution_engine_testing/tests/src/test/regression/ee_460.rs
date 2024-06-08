@@ -1,9 +1,9 @@
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, LOCAL_GENESIS_REQUEST,
 };
-use casper_execution_engine::shared::transform::Transform;
-use casper_types::{runtime_args, RuntimeArgs, U512};
+use casper_types::{
+    addressable_entity::EntityKindTag, execution::TransformKindV2, runtime_args, Key, U512,
+};
 
 const CONTRACT_EE_460_REGRESSION: &str = "ee_460_regression.wasm";
 
@@ -18,9 +18,9 @@ fn should_run_ee_460_no_side_effects_on_error_regression() {
         runtime_args! { ARG_AMOUNT => U512::max_value() },
     )
     .build();
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
     builder
-        .run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST)
+        .run_genesis(LOCAL_GENESIS_REQUEST.clone())
         .exec(exec_request_1)
         .expect_success()
         .commit();
@@ -29,14 +29,16 @@ fn should_run_ee_460_no_side_effects_on_error_regression() {
     // mint uref, which should mean no new purses are created in case of
     // transfer error. This is considered sufficient cause to confirm that the
     // mint uref is left untouched.
-    let mint_contract_uref = builder.get_mint_contract_hash();
+    let mint_entity_key =
+        Key::addressable_entity_key(EntityKindTag::System, builder.get_mint_contract_hash());
 
-    let transforms = &builder.get_execution_journals()[0];
-    let mint_transforms = transforms
+    let effects = &builder.get_effects()[0];
+    let mint_transforms = effects
+        .transforms()
         .iter()
-        .find(|(key, _transform)| key == &mint_contract_uref.into())
+        .find(|transform| transform.key() == &mint_entity_key)
         // Skips the Identity writes introduced since payment code execution for brevity of the
         // check
-        .filter(|(_, v)| v != &Transform::Identity);
+        .filter(|transform| transform.kind() != &TransformKindV2::Identity);
     assert!(mint_transforms.is_none());
 }

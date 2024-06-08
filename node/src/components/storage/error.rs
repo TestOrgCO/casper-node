@@ -1,16 +1,16 @@
-use std::{io, path::PathBuf};
+use std::{fmt::Debug, io, path::PathBuf};
 
+use casper_binary_port::RecordId;
 use thiserror::Error;
 use tracing::error;
 
-use casper_hashing::Digest;
-use casper_types::{bytesrepr, crypto, EraId};
-
-use super::lmdb_ext::LmdbExtError;
-use crate::types::{
-    error::BlockValidationError, BlockBody, BlockHash, BlockHashAndHeight, BlockHeader, DeployHash,
-    FinalitySignature, FinalitySignatureId,
+use casper_types::{
+    bytesrepr, crypto, BlockBody, BlockHash, BlockHeader, BlockValidationError, DeployHash, Digest,
+    EraId, FinalitySignature, FinalitySignatureId, TransactionHash,
 };
+
+use crate::types::VariantMismatch;
+use casper_storage::block_store::BlockStoreError;
 
 /// A fatal storage component error.
 ///
@@ -21,16 +21,6 @@ pub enum FatalStorageError {
     /// Failure to create the root database directory.
     #[error("failed to create database directory `{}`: {}", .0.display(), .1)]
     CreateDatabaseDirectory(PathBuf, io::Error),
-    /// Found a duplicate block-at-height index entry.
-    #[error("duplicate entries for block at height {height}: {first} / {second}")]
-    DuplicateBlockIndex {
-        /// Height at which duplicate was found.
-        height: u64,
-        /// First block hash encountered at `height`.
-        first: BlockHash,
-        /// Second block hash encountered at `height`.
-        second: BlockHash,
-    },
     /// Found a duplicate switch-block-at-era-id index entry.
     #[error("duplicate entries for switch block at era id {era_id}: {first} / {second}")]
     DuplicateEraIdIndex {
@@ -41,22 +31,12 @@ pub enum FatalStorageError {
         /// Second block hash encountered at `era_id`.
         second: BlockHash,
     },
-    /// Found a duplicate switch-block-at-era-id index entry.
-    #[error("duplicate entries for blocks for deploy {deploy_hash}: {first} / {second}")]
-    DuplicateDeployIndex {
-        /// Deploy hash at which duplicate was found.
-        deploy_hash: DeployHash,
-        /// First block hash encountered at `deploy_hash`.
-        first: BlockHashAndHeight,
-        /// Second block hash encountered at `deploy_hash`.
-        second: BlockHashAndHeight,
-    },
-    /// LMDB error while operating.
-    #[error("internal database error: {0}")]
-    InternalStorage(#[from] LmdbExtError),
     /// An internal DB error - blocks should be overwritten.
     #[error("failed overwriting block")]
     FailedToOverwriteBlock,
+    /// Record specified in raw request has not been found in the storage module.
+    #[error("unable to find db for record: {0}")]
+    DatabaseNotFound(RecordId),
     /// Filesystem error while trying to move file.
     #[error("unable to move file {source_path} to {dest_path}: {original_error}")]
     UnableToMoveFile {
@@ -135,13 +115,11 @@ pub enum FatalStorageError {
     /// Failed to serialize an item that was found in local storage.
     #[error("failed to serialized stored item")]
     StoredItemSerializationFailure(#[source] bincode::Error),
-    /// We tried to store finalized approvals for a nonexistent deploy.
-    #[error(
-        "Tried to store FinalizedApprovals for a nonexistent deploy. Deploy hash: {deploy_hash:?}"
-    )]
+    /// We tried to store finalized approvals for a nonexistent transaction.
+    #[error("Tried to store FinalizedApprovals for a nonexistent transaction {transaction_hash}")]
     UnexpectedFinalizedApprovals {
-        /// The missing deploy hash.
-        deploy_hash: DeployHash,
+        /// The missing transaction hash.
+        transaction_hash: TransactionHash,
     },
     /// `ToBytes` serialization failure of an item that should never fail to serialize.
     #[error("unexpected serialization failure: {0}")]
@@ -162,16 +140,29 @@ pub enum FatalStorageError {
         /// The number of approvals hashes.
         actual: usize,
     },
+    /// V1 execution results hashmap doesn't have exactly one entry.
+    #[error(
+        "stored v1 execution results doesn't have exactly one entry: deploy: {deploy_hash}, number \
+        of entries: {results_length}"
+    )]
+    InvalidExecutionResultsV1Length {
+        /// The deploy hash.
+        deploy_hash: DeployHash,
+        /// The number of execution results.
+        results_length: usize,
+    },
     /// Error initializing metrics.
     #[error("failed to initialize metrics for storage: {0}")]
     Prometheus(#[from] prometheus::Error),
-}
-
-// We wholesale wrap lmdb errors and treat them as internal errors here.
-impl From<lmdb::Error> for FatalStorageError {
-    fn from(err: lmdb::Error) -> Self {
-        LmdbExtError::from(err).into()
-    }
+    /// Type mismatch indicating programmer error.
+    #[error(transparent)]
+    VariantMismatch(#[from] VariantMismatch),
+    /// BlockStoreError
+    #[error(transparent)]
+    BlockStoreError(#[from] BlockStoreError),
+    /// BlockStoreError
+    #[error("unexpected record id {0}")]
+    UnexpectedRecordId(RecordId),
 }
 
 impl From<Box<BlockValidationError>> for FatalStorageError {

@@ -1,8 +1,7 @@
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, LOCAL_GENESIS_REQUEST,
 };
-use casper_types::{account::Weight, runtime_args, RuntimeArgs};
+use casper_types::{addressable_entity::Weight, runtime_args};
 
 const CONTRACT_EE_539_REGRESSION: &str = "ee_539_regression.wasm";
 const ARG_KEY_MANAGEMENT_THRESHOLD: &str = "key_management_threshold";
@@ -20,9 +19,9 @@ fn should_run_ee_539_serialize_action_thresholds_regression() {
     )
         .build();
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
     builder
-        .run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST)
+        .run_genesis(LOCAL_GENESIS_REQUEST.clone())
         .exec(exec_request)
         .expect_success()
         .commit();

@@ -12,21 +12,28 @@ use serde::{
 };
 use strum::EnumDiscriminants;
 
-use casper_hashing::Digest;
 #[cfg(test)]
 use casper_types::testing::TestRng;
-use casper_types::{crypto, AsymmetricType, ProtocolVersion, PublicKey, SecretKey, Signature};
+use casper_types::{
+    crypto, AsymmetricType, Chainspec, Digest, ProtocolVersion, PublicKey, SecretKey, Signature,
+    AUCTION_LANE_ID, INSTALL_UPGRADE_LANE_ID, MINT_LANE_ID,
+};
 
 use super::{counting_format::ConnectionId, health::Nonce, BincodeFormat};
 use crate::{
     effect::EffectBuilder,
     protocol,
-    types::{Chainspec, NodeId},
+    types::NodeId,
     utils::{
         opt_display::OptDisplay,
         specimen::{Cache, LargestSpecimen, SizeEstimator},
     },
 };
+
+use tracing::warn;
+
+// Additional overhead accounted for (eg. lower level networking packet encapsulation).
+const NETWORK_MESSAGE_LIMIT_SAFETY_MARGIN: usize = 256;
 
 /// The default protocol version to use in absence of one in the protocol version field.
 #[inline]
@@ -319,16 +326,16 @@ pub(crate) enum MessageKind {
     Protocol,
     /// Messages directly related to consensus.
     Consensus,
-    /// Deploys being gossiped.
-    DeployGossip,
+    /// Transactions being gossiped.
+    TransactionGossip,
     /// Blocks being gossiped.
     BlockGossip,
     /// Finality signatures being gossiped.
     FinalitySignatureGossip,
     /// Addresses being gossiped.
     AddressGossip,
-    /// Deploys being transferred directly (via requests).
-    DeployTransfer,
+    /// Transactions being transferred directly (via requests).
+    TransactionTransfer,
     /// Blocks for finality signatures being transferred directly (via requests and other means).
     BlockTransfer,
     /// Tries transferred, usually as part of chain syncing.
@@ -342,11 +349,11 @@ impl Display for MessageKind {
         match self {
             MessageKind::Protocol => f.write_str("protocol"),
             MessageKind::Consensus => f.write_str("consensus"),
-            MessageKind::DeployGossip => f.write_str("deploy_gossip"),
+            MessageKind::TransactionGossip => f.write_str("transaction_gossip"),
             MessageKind::BlockGossip => f.write_str("block_gossip"),
             MessageKind::FinalitySignatureGossip => f.write_str("finality_signature_gossip"),
             MessageKind::AddressGossip => f.write_str("address_gossip"),
-            MessageKind::DeployTransfer => f.write_str("deploy_transfer"),
+            MessageKind::TransactionTransfer => f.write_str("transaction_transfer"),
             MessageKind::BlockTransfer => f.write_str("block_transfer"),
             MessageKind::TrieTransfer => f.write_str("trie_transfer"),
             MessageKind::Other => f.write_str("other"),
@@ -401,6 +408,7 @@ pub(crate) trait FromIncoming<P> {
         Err(payload)
     }
 }
+
 /// A generic configuration for payload weights.
 ///
 /// Implementors of `Payload` are free to interpret this as they see fit.
@@ -410,12 +418,12 @@ pub(crate) trait FromIncoming<P> {
 pub struct EstimatorWeights {
     pub consensus: u32,
     pub block_gossip: u32,
-    pub deploy_gossip: u32,
+    pub transaction_gossip: u32,
     pub finality_signature_gossip: u32,
     pub address_gossip: u32,
     pub finality_signature_broadcasts: u32,
-    pub deploy_requests: u32,
-    pub deploy_responses: u32,
+    pub transaction_requests: u32,
+    pub transaction_responses: u32,
     pub legacy_deploy_requests: u32,
     pub legacy_deploy_responses: u32,
     pub block_requests: u32,
@@ -504,13 +512,18 @@ impl<'a> NetworkMessageEstimator<'a> {
 
     /// Returns a parameter by name as `i64`.
     fn get_parameter(&self, name: &'static str) -> Option<i64> {
+        let max_transaction_size = self
+            .chainspec
+            .transaction_config
+            .transaction_v1_config
+            .get_max_serialized_length(INSTALL_UPGRADE_LANE_ID);
         Some(match name {
             // The name limit will be larger than the actual name, so it is a safe upper bound.
             "network_name_limit" => self.chainspec.network_config.name.len() as i64,
             // These limits are making deploys bigger than they actually are, since many items
             // have both a `contract_name` and an `entry_point`. We accept 2X as an upper bound.
-            "contract_name_limit" => self.chainspec.deploy_config.max_deploy_size as i64,
-            "entry_point_limit" => self.chainspec.deploy_config.max_deploy_size as i64,
+            "contract_name_limit" => max_transaction_size as i64,
+            "entry_point_limit" => max_transaction_size as i64,
             "recent_era_count" => {
                 (self.chainspec.core_config.unbonding_delay
                     - self.chainspec.core_config.auction_delay) as i64
@@ -524,19 +537,41 @@ impl<'a> NetworkMessageEstimator<'a> {
                 .minimum_block_time
                 .millis()
                 .max(1) as i64,
-            "max_deploy_size" => self.chainspec.deploy_config.max_deploy_size as i64,
-            "approvals_hashes" => {
-                (self.chainspec.deploy_config.block_max_deploy_count
-                    + self.chainspec.deploy_config.block_max_transfer_count) as i64
+            "max_transaction_size" => max_transaction_size as i64,
+            "approvals_hashes" => self
+                .chainspec
+                .transaction_config
+                .transaction_v1_config
+                .get_max_block_count() as i64,
+            "max_mint_per_block" => self
+                .chainspec
+                .transaction_config
+                .transaction_v1_config
+                .get_max_transaction_count(MINT_LANE_ID) as i64,
+            "max_auctions_per_block" => {
+                self.chainspec
+                    .transaction_config
+                    .transaction_v1_config
+                    .get_max_transaction_count(AUCTION_LANE_ID) as i64
             }
-            "max_deploys_per_block" => self.chainspec.deploy_config.block_max_deploy_count as i64,
-            "max_transfers_per_block" => {
-                self.chainspec.deploy_config.block_max_transfer_count as i64
+            "max_install_upgrade_transactions_per_block" => {
+                self.chainspec
+                    .transaction_config
+                    .transaction_v1_config
+                    .get_max_transaction_count(INSTALL_UPGRADE_LANE_ID) as i64
             }
-            "average_approvals_per_deploy_in_block" => {
-                let max_total_deploys = (self.chainspec.deploy_config.block_max_deploy_count
-                    + self.chainspec.deploy_config.block_max_transfer_count)
-                    as i64;
+            "max_standard_transactions_per_block" => {
+                self.chainspec
+                    .transaction_config
+                    .transaction_v1_config
+                    .get_max_wasm_transaction_count() as i64
+            }
+            "average_approvals_per_transaction_in_block" => {
+                let max_total_txns = self
+                    .chainspec
+                    .transaction_config
+                    .transaction_v1_config
+                    .get_max_block_count() as i64;
 
                 // Note: The +1 is to overestimate, as depending on the serialization format chosen,
                 //       spreading out the approvals can increase or decrease the size. For
@@ -544,9 +579,10 @@ impl<'a> NetworkMessageEstimator<'a> {
                 //       in a smaller size if variable size integer encoding it used. In a format
                 //       using separators without trailing separators (e.g. commas in JSON),
                 //       spreading out will reduce the total number of bytes.
-                ((self.chainspec.deploy_config.block_max_approval_count as i64 + max_total_deploys
+                ((self.chainspec.transaction_config.block_max_approval_count as i64
+                    + max_total_txns
                     - 1)
-                    / max_total_deploys)
+                    / max_total_txns)
                     .max(0)
                     + 1
             }
@@ -556,6 +592,9 @@ impl<'a> NetworkMessageEstimator<'a> {
             // Endorsements are currently hard-disabled (via code). If ever re-enabled, this
             // parameter should ideally be removed entirely.
             "endorsements_enabled" => 0,
+            "signature_rewards_max_delay" => {
+                self.chainspec.core_config.signature_rewards_max_delay as i64
+            }
             _ => return None,
         })
     }
@@ -574,15 +613,31 @@ where
 }
 
 /// Creates a serialized specimen of the largest possible networking message.
-pub(crate) fn generate_largest_message(chainspec: &Chainspec) -> Message<protocol::Message> {
+fn generate_largest_message(chainspec: &Chainspec) -> Message<protocol::Message> {
     let estimator = &NetworkMessageEstimator::new(chainspec);
     let cache = &mut Cache::default();
 
     Message::largest_specimen(estimator, cache)
 }
 
-pub(crate) fn generate_largest_serialized_message(chainspec: &Chainspec) -> Vec<u8> {
-    serialize_net_message(&generate_largest_message(chainspec))
+/// Enforces chainspec configured message size limit.
+pub(crate) fn within_message_size_limit_tolerance(chainspec: &Chainspec) -> bool {
+    // Ensure the size of the largest message generated under these chainspec settings does not
+    // exceed the configured message size limit.
+    let configured_maximum = chainspec.network_config.maximum_net_message_size as usize;
+    let serialized = serialize_net_message(&generate_largest_message(chainspec));
+    let calculated_size = serialized.len();
+    let within_tolerance =
+        calculated_size + NETWORK_MESSAGE_LIMIT_SAFETY_MARGIN <= configured_maximum;
+    if !within_tolerance {
+        warn!(
+            calculated_size,
+            configured_maximum,
+            "config value [network][maximum_net_message_size] is too small to accommodate the \
+            maximum message size"
+        );
+    }
+    within_tolerance
 }
 
 impl<'a> SizeEstimator for NetworkMessageEstimator<'a> {

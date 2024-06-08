@@ -9,21 +9,20 @@ use itertools::Itertools;
 use num_rational::Ratio;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-use casper_hashing::Digest;
-use casper_types::{crypto, EraId, ProtocolVersion};
 use tracing::error;
+
+use casper_types::{
+    crypto, BlockHash, BlockHeader, BlockSignatures, Digest, EraId, ProtocolConfig,
+    ProtocolVersion, SignedBlockHeader, SignedBlockHeaderValidationError,
+};
 
 use crate::{
     components::fetcher::{FetchItem, Tag},
-    types::{
-        error::BlockHeaderWithMetadataValidationError, BlockHash, BlockHeader,
-        BlockHeaderWithMetadata, BlockSignatures, EraValidatorWeights,
-    },
+    types::EraValidatorWeights,
     utils::{self, BlockSignatureError},
 };
 
-use super::{chainspec::ProtocolConfig, sync_leap_validation_metadata::SyncLeapValidationMetaData};
+use super::sync_leap_validation_metadata::SyncLeapValidationMetaData;
 
 #[derive(Error, Debug)]
 pub(crate) enum SyncLeapValidationError {
@@ -36,7 +35,7 @@ pub(crate) enum SyncLeapValidationError {
     #[error("The block signatures are not cryptographically valid: {0}")]
     Crypto(crypto::Error),
     #[error(transparent)]
-    BlockWithMetadata(BlockHeaderWithMetadataValidationError),
+    SignedBlockHeader(SignedBlockHeaderValidationError),
     #[error("Too many switch blocks: leaping across that many eras is not allowed.")]
     TooManySwitchBlocks,
     #[error("Trusted ancestor headers must be in reverse chronological order.")]
@@ -121,7 +120,7 @@ pub(crate) struct SyncLeap {
     pub trusted_ancestor_headers: Vec<BlockHeader>,
     /// The headers of all switch blocks known to the sender, after the trusted block but before
     /// their highest block, with signatures, plus the signed highest block.
-    pub signed_block_headers: Vec<BlockHeaderWithMetadata>,
+    pub signed_block_headers: Vec<SignedBlockHeader>,
 }
 
 impl SyncLeap {
@@ -232,10 +231,10 @@ impl SyncLeap {
         let signatures = self
             .signed_block_headers
             .iter()
-            .find(|block_header_with_metadata| {
-                block_header_with_metadata.block_header.height() == header.height()
+            .find(|signed_block_header| {
+                signed_block_header.block_header().height() == header.height()
             })
-            .map(|block_header_with_metadata| &block_header_with_metadata.block_signatures);
+            .map(|signed_block_header| signed_block_header.block_signatures());
         (header, signatures)
     }
 
@@ -246,7 +245,7 @@ impl SyncLeap {
     pub(crate) fn headers(&self) -> impl Iterator<Item = &BlockHeader> {
         iter::once(&self.trusted_block_header)
             .chain(&self.trusted_ancestor_headers)
-            .chain(self.signed_block_headers.iter().map(|sh| &sh.block_header))
+            .chain(self.signed_block_headers.iter().map(|sh| sh.block_header()))
     }
 
     pub(crate) fn switch_blocks_headers(&self) -> impl Iterator<Item = &BlockHeader> {
@@ -318,9 +317,9 @@ impl FetchItem for SyncLeap {
         let mut signatures: BTreeMap<EraId, Vec<&BlockSignatures>> = BTreeMap::new();
         for signed_header in &self.signed_block_headers {
             signatures
-                .entry(signed_header.block_signatures.era_id)
+                .entry(signed_header.block_signatures().era_id())
                 .or_default()
-                .push(&signed_header.block_signatures);
+                .push(signed_header.block_signatures());
         }
 
         let mut headers_with_sufficient_finality: Vec<BlockHash> =
@@ -354,7 +353,7 @@ impl FetchItem for SyncLeap {
                                     err,
                                 ));
                             }
-                            headers_with_sufficient_finality.push(sigs.block_hash);
+                            headers_with_sufficient_finality.push(*sigs.block_hash());
                         }
                     }
                 }
@@ -372,15 +371,15 @@ impl FetchItem for SyncLeap {
 
         for signed_header in &self.signed_block_headers {
             signed_header
-                .validate()
-                .map_err(SyncLeapValidationError::BlockWithMetadata)?;
+                .is_valid()
+                .map_err(SyncLeapValidationError::SignedBlockHeader)?;
         }
 
         // defer cryptographic verification until last to avoid unnecessary computation
         for signed_header in &self.signed_block_headers {
             signed_header
-                .block_signatures
-                .verify()
+                .block_signatures()
+                .is_verified()
                 .map_err(SyncLeapValidationError::Crypto)?;
         }
 
@@ -389,12 +388,9 @@ impl FetchItem for SyncLeap {
 }
 
 mod specimen_support {
-    use crate::{
-        types::block::specimen_support::BlockHeaderWithoutEraEnd,
-        utils::specimen::{
-            estimator_max_rounds_per_era, vec_of_largest_specimen, vec_prop_specimen, Cache,
-            LargestSpecimen, SizeEstimator,
-        },
+    use crate::utils::specimen::{
+        estimator_max_rounds_per_era, vec_of_largest_specimen, vec_prop_specimen,
+        BlockHeaderWithoutEraEnd, Cache, LargestSpecimen, SizeEstimator,
     };
 
     use super::{SyncLeap, SyncLeapIdentifier};
@@ -414,7 +410,7 @@ mod specimen_support {
             trusted_ancestor_headers.extend(
                 non_switch_block_ancestors
                     .into_iter()
-                    .map(BlockHeaderWithoutEraEnd::into_inner),
+                    .map(BlockHeaderWithoutEraEnd::into_block_header),
             );
 
             let signed_block_headers = vec_prop_specimen(estimator, "recent_era_count", cache);
@@ -450,117 +446,93 @@ mod tests {
         iter,
     };
 
-    use casper_types::{
-        crypto, testing::TestRng, EraId, ProtocolVersion, PublicKey, SecretKey, Signature,
-        Timestamp, U512,
-    };
     use num_rational::Ratio;
     use rand::Rng;
+
+    use casper_types::{
+        crypto, testing::TestRng, ActivationPoint, Block, BlockHash, BlockHeader,
+        BlockSignaturesV2, BlockV2, ChainNameDigest, EraEndV2, EraId, FinalitySignatureV2,
+        GlobalStateUpdate, ProtocolConfig, ProtocolVersion, PublicKey, SecretKey,
+        SignedBlockHeader, TestBlockBuilder, Timestamp, TransactionHash, TransactionV1Hash,
+        AUCTION_LANE_ID, INSTALL_UPGRADE_LANE_ID, MINT_LANE_ID, U512,
+    };
 
     use super::SyncLeap;
     use crate::{
         components::fetcher::FetchItem,
         types::{
-            chainspec::{GlobalStateUpdate, ProtocolConfig},
             sync_leap::SyncLeapValidationError,
-            sync_leap_validation_metadata::SyncLeapValidationMetaData,
-            ActivationPoint, Block, BlockHash, BlockHeader, BlockHeaderWithMetadata,
-            BlockSignatures, EraValidatorWeights, FinalitySignature, FinalizedBlock,
+            sync_leap_validation_metadata::SyncLeapValidationMetaData, EraValidatorWeights,
             SyncLeapIdentifier,
         },
         utils::BlockSignatureError,
     };
 
-    fn random_block_at_height(rng: &mut TestRng, height: u64) -> Block {
-        let era_id = rng.gen();
-        let protocol_version = ProtocolVersion::default();
-        let is_switch = rng.gen();
-
-        Block::random_with_specifics(
-            rng,
-            era_id,
-            height,
-            protocol_version,
-            is_switch,
-            iter::empty(),
-        )
-    }
-
-    fn random_switch_block_at_height_and_era_and_version(
-        rng: &mut TestRng,
-        height: u64,
-        era_id: EraId,
-        protocol_version: ProtocolVersion,
-    ) -> Block {
-        let is_switch = true;
-
-        Block::random_with_specifics(
-            rng,
-            era_id,
-            height,
-            protocol_version,
-            is_switch,
-            iter::empty(),
-        )
-    }
-
     fn make_signed_block_header_from_height(
         height: usize,
-        test_chain: &[Block],
+        test_chain: &[BlockV2],
         validators: &[ValidatorSpec],
+        chain_name_hash: ChainNameDigest,
         add_proofs: bool,
-    ) -> BlockHeaderWithMetadata {
-        let header = test_chain.get(height).unwrap().header().clone();
-        make_signed_block_header_from_header(&header, validators, add_proofs)
+    ) -> SignedBlockHeader {
+        let header = Block::from(test_chain.get(height).unwrap()).clone_header();
+        make_signed_block_header_from_header(&header, validators, chain_name_hash, add_proofs)
     }
 
     fn make_signed_block_header_from_header(
         block_header: &BlockHeader,
         validators: &[ValidatorSpec],
+        chain_name_hash: ChainNameDigest,
         add_proofs: bool,
-    ) -> BlockHeaderWithMetadata {
+    ) -> SignedBlockHeader {
         let hash = block_header.block_hash();
+        let height = block_header.height();
         let era_id = block_header.era_id();
-        let mut block_signatures = BlockSignatures::new(hash, era_id);
+        let mut block_signatures = BlockSignaturesV2::new(hash, height, era_id, chain_name_hash);
         validators.iter().for_each(
             |ValidatorSpec {
                  secret_key,
-                 public_key,
+                 public_key: _,
                  weight: _,
              }| {
-                let finality_signature =
-                    FinalitySignature::create(hash, era_id, secret_key, public_key.clone());
+                let fin_sig =
+                    FinalitySignatureV2::create(hash, height, era_id, chain_name_hash, secret_key);
                 if add_proofs {
-                    block_signatures.insert_proof(public_key.clone(), finality_signature.signature);
+                    block_signatures
+                        .insert_signature(fin_sig.public_key().clone(), *fin_sig.signature());
                 }
             },
         );
 
-        BlockHeaderWithMetadata {
-            block_header: block_header.clone(),
-            block_signatures,
-        }
+        SignedBlockHeader::new(block_header.clone(), block_signatures.into())
     }
 
     fn make_test_sync_leap_with_chain(
         validators: &[ValidatorSpec],
-        test_chain: &[Block],
+        test_chain: &[BlockV2],
         query: usize,
         trusted_ancestor_headers: &[usize],
         signed_block_headers: &[usize],
+        chain_name_hash: ChainNameDigest,
         add_proofs: bool,
     ) -> SyncLeap {
-        let trusted_block_header = test_chain.get(query).unwrap().header().clone();
+        let trusted_block_header = Block::from(test_chain.get(query).unwrap()).clone_header();
 
         let trusted_ancestor_headers: Vec<_> = trusted_ancestor_headers
             .iter()
-            .map(|height| test_chain.get(*height).unwrap().header().clone())
+            .map(|height| Block::from(test_chain.get(*height).unwrap()).clone_header())
             .collect();
 
         let signed_block_headers: Vec<_> = signed_block_headers
             .iter()
             .map(|height| {
-                make_signed_block_header_from_height(*height, test_chain, validators, add_proofs)
+                make_signed_block_header_from_height(
+                    *height,
+                    test_chain,
+                    validators,
+                    chain_name_hash,
+                    add_proofs,
+                )
             })
             .collect();
 
@@ -585,6 +557,7 @@ mod tests {
         let mut test_chain_spec =
             TestChainSpec::new(rng, Some(switch_blocks.to_vec()), None, validators);
         let test_chain: Vec<_> = test_chain_spec.iter().take(12).collect();
+        let chain_name_hash = ChainNameDigest::random(rng);
 
         make_test_sync_leap_with_chain(
             validators,
@@ -592,6 +565,7 @@ mod tests {
             query,
             trusted_ancestor_headers,
             signed_block_headers,
+            chain_name_hash,
             add_proofs,
         )
     }
@@ -690,11 +664,11 @@ mod tests {
         let validation_metadata = test_sync_leap_validation_metadata();
 
         // Trusted ancestors can't be empty when trusted block height is greater than 0.
-        let block = random_block_at_height(&mut rng, 1);
+        let block = TestBlockBuilder::new().height(1).build(&mut rng);
 
         let sync_leap = SyncLeap {
             trusted_ancestor_only: false,
-            trusted_block_header: block.take_header(),
+            trusted_block_header: block.take_header().into(),
             trusted_ancestor_headers: Default::default(),
             signed_block_headers: Default::default(),
         };
@@ -706,11 +680,11 @@ mod tests {
 
         // When trusted block height is 0, validation should not fail due trusted ancestors being
         // empty.
-        let block = random_block_at_height(&mut rng, 0);
+        let block = TestBlockBuilder::new().height(0).build(&mut rng);
 
         let sync_leap = SyncLeap {
             trusted_ancestor_only: false,
-            trusted_block_header: block.take_header(),
+            trusted_block_header: block.take_header().into(),
             trusted_ancestor_headers: Default::default(),
             signed_block_headers: Default::default(),
         };
@@ -732,18 +706,20 @@ mod tests {
         // Max allowed size should NOT trigger the `TooManySwitchBlocks` error.
         let generated_block_count = max_allowed_size;
 
-        let block = random_block_at_height(&mut rng, 0);
+        let block = TestBlockBuilder::new().height(0).build_versioned(&mut rng);
+        let chain_name_hash = ChainNameDigest::random(&mut rng);
         let sync_leap = SyncLeap {
             trusted_ancestor_only: false,
-            trusted_block_header: block.take_header(),
+            trusted_block_header: block.clone_header(),
             trusted_ancestor_headers: Default::default(),
             signed_block_headers: iter::repeat_with(|| {
-                let block = Block::random(&mut rng);
+                let block = TestBlockBuilder::new().build_versioned(&mut rng);
                 let hash = block.hash();
-                BlockHeaderWithMetadata {
-                    block_header: block.header().clone(),
-                    block_signatures: BlockSignatures::new(*hash, 0.into()),
-                }
+                let height = block.height();
+                SignedBlockHeader::new(
+                    block.clone_header(),
+                    BlockSignaturesV2::new(*hash, height, 0.into(), chain_name_hash).into(),
+                )
             })
             .take(generated_block_count as usize)
             .collect(),
@@ -757,18 +733,19 @@ mod tests {
         // Generating one more block should trigger the `TooManySwitchBlocks` error.
         let generated_block_count = max_allowed_size + 1;
 
-        let block = random_block_at_height(&mut rng, 0);
+        let block = TestBlockBuilder::new().height(0).build_versioned(&mut rng);
         let sync_leap = SyncLeap {
             trusted_ancestor_only: false,
             trusted_block_header: block.take_header(),
             trusted_ancestor_headers: Default::default(),
             signed_block_headers: iter::repeat_with(|| {
-                let block = Block::random(&mut rng);
+                let block = TestBlockBuilder::new().build_versioned(&mut rng);
                 let hash = block.hash();
-                BlockHeaderWithMetadata {
-                    block_header: block.header().clone(),
-                    block_signatures: BlockSignatures::new(*hash, 0.into()),
-                }
+                let height = block.height();
+                SignedBlockHeader::new(
+                    block.clone_header(),
+                    BlockSignaturesV2::new(*hash, height, 0.into(), chain_name_hash).into(),
+                )
             })
             .take(generated_block_count as usize)
             .collect(),
@@ -789,13 +766,14 @@ mod tests {
         // expected to be sorted backwards (from the most recent ancestor back to the switch block).
         // Therefore, the generated blocks should cause the `TrustedAncestorsNotSorted` error to be
         // triggered.
-        let block = random_block_at_height(&mut rng, 0);
+        let block = TestBlockBuilder::new().height(0).build(&mut rng);
         let block_iterator =
             TestBlockIterator::new(block.clone(), &mut rng, None, None, Default::default());
+        let block = Block::from(block);
 
         let trusted_ancestor_headers = block_iterator
             .take(3)
-            .map(|block| block.take_header())
+            .map(|block| block.take_header().into())
             .collect();
 
         let sync_leap = SyncLeap {
@@ -812,15 +790,16 @@ mod tests {
 
         // Single trusted ancestor header it should never trigger the `TrustedAncestorsNotSorted`
         // error.
-        let block = random_block_at_height(&mut rng, 0);
+        let block = TestBlockBuilder::new().height(0).build(&mut rng);
         let block_iterator =
             TestBlockIterator::new(block.clone(), &mut rng, None, None, Default::default());
 
         let trusted_ancestor_headers = block_iterator
             .take(1)
-            .map(|block| block.take_header())
+            .map(|block| block.take_header().into())
             .collect();
 
+        let block = Block::from(block);
         let sync_leap = SyncLeap {
             trusted_ancestor_only: false,
             trusted_block_header: block.take_header(),
@@ -842,7 +821,7 @@ mod tests {
         // Make sure `TestBlockIterator` creates no switch blocks.
         let switch_blocks = None;
 
-        let block = random_block_at_height(&mut rng, 0);
+        let block = TestBlockBuilder::new().height(0).build(&mut rng);
         let block_iterator = TestBlockIterator::new(
             block.clone(),
             &mut rng,
@@ -853,12 +832,13 @@ mod tests {
 
         let trusted_ancestor_headers: Vec<_> = block_iterator
             .take(3)
-            .map(|block| block.take_header())
+            .map(|block| block.take_header().into())
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
             .collect();
 
+        let block = Block::from(block);
         let sync_leap = SyncLeap {
             trusted_ancestor_only: false,
             trusted_block_header: block.take_header(),
@@ -998,19 +978,19 @@ mod tests {
 
         // Add single orphaned block. Signatures are cloned from a legit block to avoid bailing on
         // the signature validation check.
-        let orphaned_block = Block::random(&mut rng);
-        let orphaned_block_with_metadata = BlockHeaderWithMetadata {
-            block_header: orphaned_block.header().clone(),
-            block_signatures: sync_leap
+        let orphaned_block = TestBlockBuilder::new().build_versioned(&mut rng);
+        let orphaned_signed_block_header = SignedBlockHeader::new(
+            orphaned_block.clone_header(),
+            sync_leap
                 .signed_block_headers
                 .first()
                 .unwrap()
-                .block_signatures
+                .block_signatures()
                 .clone(),
-        };
+        );
         sync_leap
             .signed_block_headers
-            .push(orphaned_block_with_metadata);
+            .push(orphaned_signed_block_header);
 
         let result = sync_leap.validate(&validation_metadata);
         assert!(matches!(
@@ -1021,8 +1001,6 @@ mod tests {
 
     #[test]
     fn should_detect_orphaned_signatures() {
-        const NON_EXISTING_ERA: u64 = u64::MAX;
-
         // Chain
         // 0   1   2   3   4   5   6   7   8   9   10   11
         // S           S           S           S
@@ -1046,9 +1024,12 @@ mod tests {
 
         // Insert signature from an era nowhere near the sync leap data. Base it on one of the
         // existing signatures to avoid bailing on the signature validation check.
-        let mut signed_block_header = sync_leap.signed_block_headers.first_mut().unwrap().clone();
-        signed_block_header.block_signatures.era_id = NON_EXISTING_ERA.into();
-        sync_leap.signed_block_headers.push(signed_block_header);
+        let mut invalid_signed_block_header =
+            sync_leap.signed_block_headers.first_mut().unwrap().clone();
+        invalid_signed_block_header.invalidate_era();
+        sync_leap
+            .signed_block_headers
+            .push(invalid_signed_block_header);
 
         let result = sync_leap.validate(&validation_metadata);
         assert!(matches!(
@@ -1080,30 +1061,11 @@ mod tests {
             add_proofs,
         );
 
-        let mut signed_block_header = sync_leap.signed_block_headers.pop().unwrap();
-
-        // Remove one correct proof.
-        let proof = signed_block_header
-            .block_signatures
-            .proofs
-            .pop_last()
-            .unwrap();
-        let validator_public_key = proof.0;
-
-        // Create unverifiable signature (`Signature::System`).
-        let finality_signature = FinalitySignature::new(
-            signed_block_header.block_header.block_hash(),
-            signed_block_header.block_header.era_id(),
-            Signature::System,
-            validator_public_key.clone(),
-        );
-
-        // Sneak it into the sync leap.
-        signed_block_header
-            .block_signatures
-            .proofs
-            .insert(validator_public_key, finality_signature.signature);
-        sync_leap.signed_block_headers.push(signed_block_header);
+        let mut invalid_signed_block_header = sync_leap.signed_block_headers.pop().unwrap();
+        invalid_signed_block_header.invalidate_last_signature();
+        sync_leap
+            .signed_block_headers
+            .push(invalid_signed_block_header);
 
         let result = sync_leap.validate(&validation_metadata);
         assert!(matches!(result, Err(SyncLeapValidationError::Crypto(_))));
@@ -1139,7 +1101,7 @@ mod tests {
             .signed_block_headers
             .get(INDEX_OF_THE_LAST_SWITCH_BLOCK)
             .unwrap();
-        let upgrade_era = upgrade_block.block_header.era_id().successor();
+        let upgrade_era = upgrade_block.block_header().era_id().successor();
         let activation_point = ActivationPoint::EraId(upgrade_era);
 
         // Set up validator change.
@@ -1172,53 +1134,79 @@ mod tests {
             .signed_block_headers
             .last()
             .unwrap()
-            .block_signatures
-            .proofs
-            .keys()
+            .block_signatures()
+            .signers()
             .cloned()
             .collect();
         assert!(
             matches!(result, Err(SyncLeapValidationError::HeadersNotSufficientlySigned(inner))
-             if matches!(&inner, BlockSignatureError::BogusValidators{
-                trusted_validator_weights: _,
-                block_signatures: _,
-                bogus_validators
-            } if bogus_validators == &expected_bogus_validators))
+                 if matches!(&inner, BlockSignatureError::BogusValidators{
+                    trusted_validator_weights: _,
+                    block_signatures: _,
+                    bogus_validators
+                } if bogus_validators == &expected_bogus_validators))
         );
     }
 
     #[test]
     fn should_return_headers() {
         let mut rng = TestRng::new();
+        let chain_name_hash = ChainNameDigest::random(&mut rng);
 
-        let trusted_block = Block::random_non_switch_block(&mut rng);
+        let trusted_block = TestBlockBuilder::new()
+            .switch_block(false)
+            .build_versioned(&mut rng);
 
-        let trusted_ancestor_1 = Block::random_switch_block(&mut rng);
-        let trusted_ancestor_2 = Block::random_non_switch_block(&mut rng);
-        let trusted_ancestor_3 = Block::random_non_switch_block(&mut rng);
+        let trusted_ancestor_1 = TestBlockBuilder::new()
+            .switch_block(true)
+            .build_versioned(&mut rng);
+        let trusted_ancestor_2 = TestBlockBuilder::new()
+            .switch_block(false)
+            .build_versioned(&mut rng);
+        let trusted_ancestor_3 = TestBlockBuilder::new()
+            .switch_block(false)
+            .build_versioned(&mut rng);
 
-        let signed_block_1 = Block::random_switch_block(&mut rng);
-        let signed_block_2 = Block::random_switch_block(&mut rng);
-        let signed_block_3 = Block::random_non_switch_block(&mut rng);
-        let signed_block_header_with_metadata_1 =
-            make_signed_block_header_from_header(signed_block_1.header(), &[], false);
-        let signed_block_header_with_metadata_2 =
-            make_signed_block_header_from_header(signed_block_2.header(), &[], false);
-        let signed_block_header_with_metadata_3 =
-            make_signed_block_header_from_header(signed_block_3.header(), &[], false);
+        let signed_block_1 = TestBlockBuilder::new()
+            .switch_block(true)
+            .build_versioned(&mut rng);
+        let signed_block_2 = TestBlockBuilder::new()
+            .switch_block(true)
+            .build_versioned(&mut rng);
+        let signed_block_3 = TestBlockBuilder::new()
+            .switch_block(false)
+            .build_versioned(&mut rng);
+        let signed_block_header_1 = make_signed_block_header_from_header(
+            &signed_block_1.clone_header(),
+            &[],
+            chain_name_hash,
+            false,
+        );
+        let signed_block_header_2 = make_signed_block_header_from_header(
+            &signed_block_2.clone_header(),
+            &[],
+            chain_name_hash,
+            false,
+        );
+        let signed_block_header_3 = make_signed_block_header_from_header(
+            &signed_block_3.clone_header(),
+            &[],
+            chain_name_hash,
+            false,
+        );
 
         let sync_leap = SyncLeap {
             trusted_ancestor_only: false,
-            trusted_block_header: trusted_block.header().clone(),
+            trusted_block_header: trusted_block.clone_header(),
             trusted_ancestor_headers: vec![
-                trusted_ancestor_1.header().clone(),
-                trusted_ancestor_2.header().clone(),
-                trusted_ancestor_3.header().clone(),
+                trusted_ancestor_1.clone_header(),
+                trusted_ancestor_2.clone_header(),
+                trusted_ancestor_3.clone_header(),
             ],
             signed_block_headers: vec![
-                signed_block_header_with_metadata_1,
-                signed_block_header_with_metadata_2,
-                signed_block_header_with_metadata_3,
+                signed_block_header_1,
+                signed_block_header_2,
+                signed_block_header_3,
             ],
         };
 
@@ -1245,34 +1233,62 @@ mod tests {
     fn should_return_switch_block_headers() {
         let mut rng = TestRng::new();
 
-        let trusted_block = Block::random_non_switch_block(&mut rng);
+        let chain_name_hash = ChainNameDigest::random(&mut rng);
 
-        let trusted_ancestor_1 = Block::random_switch_block(&mut rng);
-        let trusted_ancestor_2 = Block::random_non_switch_block(&mut rng);
-        let trusted_ancestor_3 = Block::random_non_switch_block(&mut rng);
+        let trusted_block = TestBlockBuilder::new()
+            .switch_block(false)
+            .build_versioned(&mut rng);
 
-        let signed_block_1 = Block::random_switch_block(&mut rng);
-        let signed_block_2 = Block::random_switch_block(&mut rng);
-        let signed_block_3 = Block::random_non_switch_block(&mut rng);
-        let signed_block_header_with_metadata_1 =
-            make_signed_block_header_from_header(signed_block_1.header(), &[], false);
-        let signed_block_header_with_metadata_2 =
-            make_signed_block_header_from_header(signed_block_2.header(), &[], false);
-        let signed_block_header_with_metadata_3 =
-            make_signed_block_header_from_header(signed_block_3.header(), &[], false);
+        let trusted_ancestor_1 = TestBlockBuilder::new()
+            .switch_block(true)
+            .build_versioned(&mut rng);
+        let trusted_ancestor_2 = TestBlockBuilder::new()
+            .switch_block(false)
+            .build_versioned(&mut rng);
+        let trusted_ancestor_3 = TestBlockBuilder::new()
+            .switch_block(false)
+            .build_versioned(&mut rng);
+
+        let signed_block_1 = TestBlockBuilder::new()
+            .switch_block(true)
+            .build_versioned(&mut rng);
+        let signed_block_2 = TestBlockBuilder::new()
+            .switch_block(true)
+            .build_versioned(&mut rng);
+        let signed_block_3 = TestBlockBuilder::new()
+            .switch_block(false)
+            .build_versioned(&mut rng);
+        let signed_block_header_1 = make_signed_block_header_from_header(
+            &signed_block_1.clone_header(),
+            &[],
+            chain_name_hash,
+            false,
+        );
+        let signed_block_header_2 = make_signed_block_header_from_header(
+            &signed_block_2.clone_header(),
+            &[],
+            chain_name_hash,
+            false,
+        );
+        let signed_block_header_3 = make_signed_block_header_from_header(
+            &signed_block_3.clone_header(),
+            &[],
+            chain_name_hash,
+            false,
+        );
 
         let sync_leap = SyncLeap {
             trusted_ancestor_only: false,
-            trusted_block_header: trusted_block.header().clone(),
+            trusted_block_header: trusted_block.clone_header(),
             trusted_ancestor_headers: vec![
-                trusted_ancestor_1.header().clone(),
-                trusted_ancestor_2.header().clone(),
-                trusted_ancestor_3.header().clone(),
+                trusted_ancestor_1.clone_header(),
+                trusted_ancestor_2.clone_header(),
+                trusted_ancestor_3.clone_header(),
             ],
             signed_block_headers: vec![
-                signed_block_header_with_metadata_1.clone(),
-                signed_block_header_with_metadata_2.clone(),
-                signed_block_header_with_metadata_3.clone(),
+                signed_block_header_1.clone(),
+                signed_block_header_2.clone(),
+                signed_block_header_3.clone(),
             ],
         };
 
@@ -1291,19 +1307,21 @@ mod tests {
         assert_eq!(expected_headers, actual_headers);
 
         // Also test when the trusted block is a switch block.
-        let trusted_block = Block::random_switch_block(&mut rng);
+        let trusted_block = TestBlockBuilder::new()
+            .switch_block(true)
+            .build_versioned(&mut rng);
         let sync_leap = SyncLeap {
             trusted_ancestor_only: false,
-            trusted_block_header: trusted_block.header().clone(),
+            trusted_block_header: trusted_block.clone_header(),
             trusted_ancestor_headers: vec![
-                trusted_ancestor_1.header().clone(),
-                trusted_ancestor_2.header().clone(),
-                trusted_ancestor_3.header().clone(),
+                trusted_ancestor_1.clone_header(),
+                trusted_ancestor_2.clone_header(),
+                trusted_ancestor_3.clone_header(),
             ],
             signed_block_headers: vec![
-                signed_block_header_with_metadata_1,
-                signed_block_header_with_metadata_2,
-                signed_block_header_with_metadata_3,
+                signed_block_header_1,
+                signed_block_header_2,
+                signed_block_header_3,
             ],
         };
         let actual_headers: BTreeSet<_> = sync_leap
@@ -1352,7 +1370,7 @@ mod tests {
             .signed_block_headers
             .last()
             .unwrap()
-            .block_header
+            .block_header()
             .clone();
         let lowest_blocks: Vec<_> = valid_sync_leap
             .trusted_ancestor_headers
@@ -1417,7 +1435,7 @@ mod tests {
             .signed_block_headers
             .last()
             .unwrap()
-            .block_header
+            .block_header()
             .clone();
         let lowest_blocks: Vec<_> = valid_sync_leap
             .trusted_ancestor_headers
@@ -1490,11 +1508,11 @@ mod tests {
             .iter()
             .take(2)
             .cloned()
-            .map(|block_header_with_metadata| block_header_with_metadata.block_header)
+            .map(|signed_block_header| signed_block_header.block_header().clone())
             .collect();
 
-        let highest_block_height = highest_block.block_header.height();
-        let highest_block_hash = highest_block.block_header.block_hash();
+        let highest_block_height = highest_block.block_header().height();
+        let highest_block_hash = highest_block.block_header().block_hash();
 
         let sync_leap = SyncLeap {
             trusted_ancestor_only: false,
@@ -1507,7 +1525,7 @@ mod tests {
                 .highest_block_header_and_signatures()
                 .0
                 .block_hash(),
-            highest_block.block_header.block_hash()
+            highest_block.block_header().block_hash()
         );
         assert_eq!(sync_leap.highest_block_hash(), highest_block_hash);
         assert_eq!(sync_leap.highest_block_height(), highest_block_height);
@@ -1578,7 +1596,7 @@ mod tests {
             .collect();
         let sync_leap = SyncLeap {
             trusted_ancestor_only: false,
-            trusted_block_header: highest_block.block_header,
+            trusted_block_header: highest_block.block_header().clone(),
             trusted_ancestor_headers: lowest_blocks,
             signed_block_headers: middle_blocks,
         };
@@ -1597,6 +1615,7 @@ mod tests {
         // Test block iterator will pull 2 validators for each created block. Indices 0 and 1 are
         // used for validators for the trusted ancestor headers.
         const FIRST_SIGNED_BLOCK_HEADER_VALIDATOR_OFFSET: usize = 2;
+
         let validators: Vec<_> = (1..100)
             .map(|weight| {
                 let (secret_key, public_key) = crypto::generate_ed25519_keypair();
@@ -1626,7 +1645,7 @@ mod tests {
 
         let mut block_iter = sync_leap.signed_block_headers.iter();
         let first_switch_block = block_iter.next().unwrap().clone();
-        let protocol_version = first_switch_block.block_header.protocol_version();
+        let protocol_version = first_switch_block.block_header().protocol_version();
         let validator_1 = validators
             .get(FIRST_SIGNED_BLOCK_HEADER_VALIDATOR_OFFSET)
             .unwrap();
@@ -1634,7 +1653,7 @@ mod tests {
             .get(FIRST_SIGNED_BLOCK_HEADER_VALIDATOR_OFFSET + 1)
             .unwrap();
         let first_era_validator_weights = EraValidatorWeights::new(
-            first_switch_block.block_header.era_id(),
+            first_switch_block.block_header().era_id(),
             [validator_1, validator_2]
                 .iter()
                 .map(
@@ -1656,7 +1675,7 @@ mod tests {
             .get(FIRST_SIGNED_BLOCK_HEADER_VALIDATOR_OFFSET + 3)
             .unwrap();
         let second_era_validator_weights = EraValidatorWeights::new(
-            second_switch_block.block_header.era_id(),
+            second_switch_block.block_header().era_id(),
             [validator_1, validator_2]
                 .iter()
                 .map(
@@ -1678,7 +1697,7 @@ mod tests {
             .get(FIRST_SIGNED_BLOCK_HEADER_VALIDATOR_OFFSET + 5)
             .unwrap();
         let third_era_validator_weights = EraValidatorWeights::new(
-            third_block.block_header.era_id(),
+            third_block.block_header().era_id(),
             [validator_1, validator_2]
                 .iter()
                 .map(
@@ -1695,7 +1714,7 @@ mod tests {
         let protocol_config = ProtocolConfig {
             version: protocol_version,
             global_state_update: None,
-            activation_point: ActivationPoint::EraId(rng.gen()),
+            activation_point: ActivationPoint::EraId(EraId::random(&mut rng)),
             hard_reset: rng.gen(),
         };
 
@@ -1707,7 +1726,7 @@ mod tests {
             vec![
                 first_era_validator_weights,
                 second_era_validator_weights,
-                third_era_validator_weights
+                third_era_validator_weights,
             ]
         )
     }
@@ -1717,6 +1736,8 @@ mod tests {
         let mut rng = TestRng::new();
 
         const DEFAULT_VALIDATOR_WEIGHT: u32 = 100;
+
+        let chain_name_hash = ChainNameDigest::random(&mut rng);
 
         let validators: Vec<_> = iter::repeat_with(crypto::generate_ed25519_keypair)
             .take(2)
@@ -1730,8 +1751,15 @@ mod tests {
         let mut test_chain_spec = TestChainSpec::new(&mut rng, Some(vec![4, 8]), None, &validators);
         let chain: Vec<_> = test_chain_spec.iter().take(12).collect();
 
-        let sync_leap =
-            make_test_sync_leap_with_chain(&validators, &chain, 11, &[10, 9, 8], &[], false);
+        let sync_leap = make_test_sync_leap_with_chain(
+            &validators,
+            &chain,
+            11,
+            &[10, 9, 8],
+            &[],
+            chain_name_hash,
+            false,
+        );
 
         let global_states_metadata = sync_leap.global_states_for_sync_across_upgrade();
         assert!(global_states_metadata.is_none());
@@ -1742,6 +1770,8 @@ mod tests {
         let mut rng = TestRng::new();
 
         const DEFAULT_VALIDATOR_WEIGHT: u32 = 100;
+
+        let chain_name_hash = ChainNameDigest::random(&mut rng);
 
         let validators: Vec<_> = iter::repeat_with(crypto::generate_ed25519_keypair)
             .take(2)
@@ -1756,35 +1786,39 @@ mod tests {
             TestChainSpec::new(&mut rng, Some(vec![4, 8]), Some(vec![8]), &validators);
         let chain: Vec<_> = test_chain_spec.iter().take(12).collect();
 
-        let sync_leap =
-            make_test_sync_leap_with_chain(&validators, &chain, 11, &[10, 9, 8], &[], false);
+        let sync_leap = make_test_sync_leap_with_chain(
+            &validators,
+            &chain,
+            11,
+            &[10, 9, 8],
+            &[],
+            chain_name_hash,
+            false,
+        );
 
         let global_states_metadata = sync_leap
             .global_states_for_sync_across_upgrade()
             .expect("should be Some");
 
         assert_eq!(global_states_metadata.after_hash, *chain[9].hash());
-        assert_eq!(
-            global_states_metadata.after_era_id,
-            chain[9].header().era_id()
-        );
+        assert_eq!(global_states_metadata.after_era_id, chain[9].era_id());
         assert_eq!(
             global_states_metadata.after_protocol_version,
-            chain[9].header().protocol_version()
+            chain[9].protocol_version()
         );
         assert_eq!(
             global_states_metadata.after_state_hash,
-            *chain[9].header().state_root_hash()
+            *chain[9].state_root_hash()
         );
 
         assert_eq!(global_states_metadata.before_hash, *chain[8].hash());
         assert_eq!(
             global_states_metadata.before_protocol_version,
-            chain[8].header().protocol_version()
+            chain[8].protocol_version()
         );
         assert_eq!(
             global_states_metadata.before_state_hash,
-            *chain[8].header().state_root_hash()
+            *chain[8].state_root_hash()
         );
 
         assert_ne!(
@@ -1799,6 +1833,8 @@ mod tests {
 
         const DEFAULT_VALIDATOR_WEIGHT: u32 = 100;
 
+        let chain_name_hash = ChainNameDigest::random(&mut rng);
+
         let validators: Vec<_> = iter::repeat_with(crypto::generate_ed25519_keypair)
             .take(2)
             .map(|(secret_key, public_key)| ValidatorSpec {
@@ -1812,34 +1848,39 @@ mod tests {
             TestChainSpec::new(&mut rng, Some(vec![4, 8, 9]), Some(vec![8]), &validators);
         let chain: Vec<_> = test_chain_spec.iter().take(12).collect();
 
-        let sync_leap = make_test_sync_leap_with_chain(&validators, &chain, 9, &[8], &[], false);
+        let sync_leap = make_test_sync_leap_with_chain(
+            &validators,
+            &chain,
+            9,
+            &[8],
+            &[],
+            chain_name_hash,
+            false,
+        );
 
         let global_states_metadata = sync_leap
             .global_states_for_sync_across_upgrade()
             .expect("should be Some");
 
         assert_eq!(global_states_metadata.after_hash, *chain[9].hash());
-        assert_eq!(
-            global_states_metadata.after_era_id,
-            chain[9].header().era_id()
-        );
+        assert_eq!(global_states_metadata.after_era_id, chain[9].era_id());
         assert_eq!(
             global_states_metadata.after_protocol_version,
-            chain[9].header().protocol_version()
+            chain[9].protocol_version()
         );
         assert_eq!(
             global_states_metadata.after_state_hash,
-            *chain[9].header().state_root_hash()
+            *chain[9].state_root_hash()
         );
 
         assert_eq!(global_states_metadata.before_hash, *chain[8].hash());
         assert_eq!(
             global_states_metadata.before_protocol_version,
-            chain[8].header().protocol_version()
+            chain[8].protocol_version()
         );
         assert_eq!(
             global_states_metadata.before_state_hash,
-            *chain[8].header().state_root_hash()
+            *chain[8].state_root_hash()
         );
 
         assert_ne!(
@@ -1852,29 +1893,28 @@ mod tests {
     fn era_validator_weights_without_genesis_without_upgrade() {
         let mut rng = TestRng::new();
 
-        let trusted_block = Block::random_non_switch_block(&mut rng);
+        let trusted_block = TestBlockBuilder::new()
+            .switch_block(false)
+            .build_versioned(&mut rng);
 
         let version = ProtocolVersion::from_parts(1, 5, 0);
 
-        let (
-            signed_block_header_with_metadata_1,
-            signed_block_header_with_metadata_2,
-            signed_block_header_with_metadata_3,
-        ) = make_three_switch_blocks_at_era_and_height_and_version(
-            &mut rng,
-            (1, 10, version),
-            (2, 20, version),
-            (3, 30, version),
-        );
+        let (signed_block_header_1, signed_block_header_2, signed_block_header_3) =
+            make_three_switch_blocks_at_era_and_height_and_version(
+                &mut rng,
+                (1, 10, version),
+                (2, 20, version),
+                (3, 30, version),
+            );
 
         let sync_leap = SyncLeap {
             trusted_ancestor_only: false,
-            trusted_block_header: trusted_block.header().clone(),
+            trusted_block_header: trusted_block.clone_header(),
             trusted_ancestor_headers: vec![],
             signed_block_headers: vec![
-                signed_block_header_with_metadata_1,
-                signed_block_header_with_metadata_2,
-                signed_block_header_with_metadata_3,
+                signed_block_header_1,
+                signed_block_header_2,
+                signed_block_header_3,
             ],
         };
 
@@ -1888,7 +1928,7 @@ mod tests {
             version,
             global_state_update: None,
             hard_reset: false,
-            activation_point: ActivationPoint::EraId(rng.gen()),
+            activation_point: ActivationPoint::EraId(EraId::random(&mut rng)),
         };
 
         let actual_eras: BTreeSet<u64> = sync_leap
@@ -1905,30 +1945,29 @@ mod tests {
     fn era_validator_weights_without_genesis_with_switch_block_preceding_immediate_switch_block() {
         let mut rng = TestRng::new();
 
-        let trusted_block = Block::random_non_switch_block(&mut rng);
+        let trusted_block = TestBlockBuilder::new()
+            .switch_block(false)
+            .build_versioned(&mut rng);
 
         let version_1 = ProtocolVersion::from_parts(1, 4, 0);
         let version_2 = ProtocolVersion::from_parts(1, 5, 0);
 
-        let (
-            signed_block_header_with_metadata_1,
-            signed_block_header_with_metadata_2,
-            signed_block_header_with_metadata_3,
-        ) = make_three_switch_blocks_at_era_and_height_and_version(
-            &mut rng,
-            (1, 10, version_1),
-            (2, 20, version_1),
-            (3, 21, version_2),
-        );
+        let (signed_block_header_1, signed_block_header_2, signed_block_header_3) =
+            make_three_switch_blocks_at_era_and_height_and_version(
+                &mut rng,
+                (1, 10, version_1),
+                (2, 20, version_1),
+                (3, 21, version_2),
+            );
 
         let sync_leap = SyncLeap {
             trusted_ancestor_only: false,
-            trusted_block_header: trusted_block.header().clone(),
+            trusted_block_header: trusted_block.clone_header(),
             trusted_ancestor_headers: vec![],
             signed_block_headers: vec![
-                signed_block_header_with_metadata_1,
-                signed_block_header_with_metadata_2,
-                signed_block_header_with_metadata_3,
+                signed_block_header_1,
+                signed_block_header_2,
+                signed_block_header_3,
             ],
         };
 
@@ -1945,7 +1984,7 @@ mod tests {
                 entries: BTreeMap::new(),
             }),
             hard_reset: false,
-            activation_point: ActivationPoint::EraId(rng.gen()),
+            activation_point: ActivationPoint::EraId(EraId::random(&mut rng)),
         };
 
         let actual_eras: BTreeSet<u64> = sync_leap
@@ -1965,7 +2004,7 @@ mod tests {
             version: version_2,
             global_state_update: None,
             hard_reset: rng.gen(),
-            activation_point: ActivationPoint::EraId(rng.gen()),
+            activation_point: ActivationPoint::EraId(EraId::random(&mut rng)),
         };
 
         let actual_eras: BTreeSet<u64> = sync_leap
@@ -1986,29 +2025,28 @@ mod tests {
     fn era_validator_weights_with_genesis_without_upgrade() {
         let mut rng = TestRng::new();
 
-        let trusted_block = Block::random_non_switch_block(&mut rng);
+        let trusted_block = TestBlockBuilder::new()
+            .switch_block(false)
+            .build_versioned(&mut rng);
 
         let version = ProtocolVersion::from_parts(1, 5, 0);
 
-        let (
-            signed_block_header_with_metadata_1,
-            signed_block_header_with_metadata_2,
-            signed_block_header_with_metadata_3,
-        ) = make_three_switch_blocks_at_era_and_height_and_version(
-            &mut rng,
-            (0, 0, version),
-            (1, 10, version),
-            (2, 20, version),
-        );
+        let (signed_block_header_1, signed_block_header_2, signed_block_header_3) =
+            make_three_switch_blocks_at_era_and_height_and_version(
+                &mut rng,
+                (0, 0, version),
+                (1, 10, version),
+                (2, 20, version),
+            );
 
         let sync_leap = SyncLeap {
             trusted_ancestor_only: false,
-            trusted_block_header: trusted_block.header().clone(),
+            trusted_block_header: trusted_block.clone_header(),
             trusted_ancestor_headers: vec![],
             signed_block_headers: vec![
-                signed_block_header_with_metadata_1,
-                signed_block_header_with_metadata_2,
-                signed_block_header_with_metadata_3,
+                signed_block_header_1,
+                signed_block_header_2,
+                signed_block_header_3,
             ],
         };
 
@@ -2021,7 +2059,7 @@ mod tests {
             version,
             global_state_update: None,
             hard_reset: false,
-            activation_point: ActivationPoint::EraId(rng.gen()),
+            activation_point: ActivationPoint::EraId(EraId::random(&mut rng)),
         };
 
         let actual_eras: BTreeSet<u64> = sync_leap
@@ -2040,40 +2078,49 @@ mod tests {
         (era_1, height_1, version_1): (u64, u64, ProtocolVersion),
         (era_2, height_2, version_2): (u64, u64, ProtocolVersion),
         (era_3, height_3, version_3): (u64, u64, ProtocolVersion),
-    ) -> (
-        BlockHeaderWithMetadata,
-        BlockHeaderWithMetadata,
-        BlockHeaderWithMetadata,
-    ) {
-        let signed_block_1 = random_switch_block_at_height_and_era_and_version(
-            rng,
-            height_1,
-            era_1.into(),
-            version_1,
-        );
-        let signed_block_2 = random_switch_block_at_height_and_era_and_version(
-            rng,
-            height_2,
-            era_2.into(),
-            version_2,
-        );
-        let signed_block_3 = random_switch_block_at_height_and_era_and_version(
-            rng,
-            height_3,
-            era_3.into(),
-            version_3,
-        );
+    ) -> (SignedBlockHeader, SignedBlockHeader, SignedBlockHeader) {
+        let chain_name_hash = ChainNameDigest::random(rng);
+        let signed_block_1 = TestBlockBuilder::new()
+            .height(height_1)
+            .era(era_1)
+            .protocol_version(version_1)
+            .switch_block(true)
+            .build_versioned(rng);
+        let signed_block_2 = TestBlockBuilder::new()
+            .height(height_2)
+            .era(era_2)
+            .protocol_version(version_2)
+            .switch_block(true)
+            .build_versioned(rng);
+        let signed_block_3 = TestBlockBuilder::new()
+            .height(height_3)
+            .era(era_3)
+            .protocol_version(version_3)
+            .switch_block(true)
+            .build_versioned(rng);
 
-        let signed_block_header_with_metadata_1 =
-            make_signed_block_header_from_header(signed_block_1.header(), &[], false);
-        let signed_block_header_with_metadata_2 =
-            make_signed_block_header_from_header(signed_block_2.header(), &[], false);
-        let signed_block_header_with_metadata_3 =
-            make_signed_block_header_from_header(signed_block_3.header(), &[], false);
+        let signed_block_header_1 = make_signed_block_header_from_header(
+            &signed_block_1.clone_header(),
+            &[],
+            chain_name_hash,
+            false,
+        );
+        let signed_block_header_2 = make_signed_block_header_from_header(
+            &signed_block_2.clone_header(),
+            &[],
+            chain_name_hash,
+            false,
+        );
+        let signed_block_header_3 = make_signed_block_header_from_header(
+            &signed_block_3.clone_header(),
+            &[],
+            chain_name_hash,
+            false,
+        );
         (
-            signed_block_header_with_metadata_1,
-            signed_block_header_with_metadata_2,
-            signed_block_header_with_metadata_3,
+            signed_block_header_1,
+            signed_block_header_2,
+            signed_block_header_3,
         )
     }
 
@@ -2108,7 +2155,7 @@ mod tests {
     // cause the 2nd and 4th blocks to be switch blocks. Validators for all eras are filled from
     // the `validators` parameter.
     pub(crate) struct TestChainSpec<'a> {
-        block: Block,
+        block: BlockV2,
         rng: &'a mut TestRng,
         switch_block_indices: Option<Vec<u64>>,
         upgrades_indices: Option<Vec<u64>>,
@@ -2122,7 +2169,7 @@ mod tests {
             upgrades_indices: Option<Vec<u64>>,
             validators: &'a [ValidatorSpec],
         ) -> Self {
-            let block = Block::random(test_rng);
+            let block = TestBlockBuilder::new().build(test_rng);
             Self {
                 block,
                 rng: test_rng,
@@ -2174,7 +2221,7 @@ mod tests {
     }
 
     pub(crate) struct TestBlockIterator<'a> {
-        block: Block,
+        block: BlockV2,
         protocol_version: ProtocolVersion,
         rng: &'a mut TestRng,
         switch_block_indices: Option<Vec<u64>>,
@@ -2185,13 +2232,13 @@ mod tests {
 
     impl<'a> TestBlockIterator<'a> {
         pub fn new(
-            block: Block,
+            block: BlockV2,
             rng: &'a mut TestRng,
             switch_block_indices: Option<Vec<u64>>,
             upgrades_indices: Option<Vec<u64>>,
             validators: Vec<(PublicKey, U512)>,
         ) -> Self {
-            let protocol_version = block.header().protocol_version();
+            let protocol_version = block.protocol_version();
             Self {
                 block,
                 protocol_version,
@@ -2205,48 +2252,46 @@ mod tests {
     }
 
     impl<'a> Iterator for TestBlockIterator<'a> {
-        type Item = Block;
+        type Item = BlockV2;
 
         fn next(&mut self) -> Option<Self::Item> {
-            let (is_switch_block, is_successor_of_switch_block, is_upgrade, validators) =
-                match &self.switch_block_indices {
-                    Some(switch_block_heights)
-                        if switch_block_heights.contains(&self.block.height()) =>
-                    {
-                        let prev_height = self.block.height().saturating_sub(1);
-                        let is_successor_of_switch_block =
-                            switch_block_heights.contains(&prev_height);
-                        let is_upgrade = is_successor_of_switch_block
-                            && self
-                                .upgrades_indices
-                                .as_ref()
-                                .map_or(false, |upgrades_indices| {
-                                    upgrades_indices.contains(&prev_height)
-                                });
-                        (
-                            true,
-                            is_successor_of_switch_block,
-                            is_upgrade,
-                            Some(self.validators.clone()),
-                        )
-                    }
-                    Some(switch_block_heights) => {
-                        let prev_height = self.block.height().saturating_sub(1);
-                        let is_successor_of_switch_block =
-                            switch_block_heights.contains(&prev_height);
-                        let is_upgrade = is_successor_of_switch_block
-                            && self
-                                .upgrades_indices
-                                .as_ref()
-                                .map_or(false, |upgrades_indices| {
-                                    upgrades_indices.contains(&prev_height)
-                                });
-                        (false, is_successor_of_switch_block, is_upgrade, None)
-                    }
-                    None => (false, false, false, None),
-                };
+            let (is_successor_of_switch_block, is_upgrade, maybe_validators) = match &self
+                .switch_block_indices
+            {
+                Some(switch_block_heights)
+                    if switch_block_heights.contains(&self.block.height()) =>
+                {
+                    let prev_height = self.block.height().saturating_sub(1);
+                    let is_successor_of_switch_block = switch_block_heights.contains(&prev_height);
+                    let is_upgrade = is_successor_of_switch_block
+                        && self
+                            .upgrades_indices
+                            .as_ref()
+                            .map_or(false, |upgrades_indices| {
+                                upgrades_indices.contains(&prev_height)
+                            });
+                    (
+                        is_successor_of_switch_block,
+                        is_upgrade,
+                        Some(self.validators.clone()),
+                    )
+                }
+                Some(switch_block_heights) => {
+                    let prev_height = self.block.height().saturating_sub(1);
+                    let is_successor_of_switch_block = switch_block_heights.contains(&prev_height);
+                    let is_upgrade = is_successor_of_switch_block
+                        && self
+                            .upgrades_indices
+                            .as_ref()
+                            .map_or(false, |upgrades_indices| {
+                                upgrades_indices.contains(&prev_height)
+                            });
+                    (is_successor_of_switch_block, is_upgrade, None)
+                }
+                None => (false, false, None),
+            };
 
-            let validators = if let Some(validators) = validators {
+            let maybe_validators = if let Some(validators) = maybe_validators {
                 let first_validator = validators.get(self.next_validator_index).unwrap();
                 let second_validator = validators.get(self.next_validator_index + 1).unwrap();
 
@@ -2273,26 +2318,70 @@ mod tests {
                 );
             }
 
-            let next = Block::new(
+            let gas_price: u8 = 1u8;
+
+            let era_end = maybe_validators.map(|validators| {
+                let rnd = EraEndV2::random(self.rng);
+                EraEndV2::new(
+                    Vec::from(rnd.equivocators()),
+                    Vec::from(rnd.inactive_validators()),
+                    validators,
+                    rnd.rewards().clone(),
+                    gas_price,
+                )
+            });
+            let next_block_era_id = if is_successor_of_switch_block {
+                self.block.era_id().successor()
+            } else {
+                self.block.era_id()
+            };
+            let count = self.rng.gen_range(0..6);
+            let mint_hashes =
+                iter::repeat_with(|| TransactionHash::V1(TransactionV1Hash::random(self.rng)))
+                    .take(count)
+                    .collect();
+            let count = self.rng.gen_range(0..6);
+            let auction_hashes =
+                iter::repeat_with(|| TransactionHash::V1(TransactionV1Hash::random(self.rng)))
+                    .take(count)
+                    .collect();
+            let count = self.rng.gen_range(0..6);
+            let install_upgrade_hashes =
+                iter::repeat_with(|| TransactionHash::V1(TransactionV1Hash::random(self.rng)))
+                    .take(count)
+                    .collect();
+            let count = self.rng.gen_range(0..6);
+            let standard_hashes =
+                iter::repeat_with(|| TransactionHash::V1(TransactionV1Hash::random(self.rng)))
+                    .take(count)
+                    .collect();
+
+            let transactions = {
+                let mut ret = BTreeMap::new();
+                ret.insert(MINT_LANE_ID, mint_hashes);
+                ret.insert(AUCTION_LANE_ID, auction_hashes);
+                ret.insert(INSTALL_UPGRADE_LANE_ID, install_upgrade_hashes);
+                ret.insert(3, standard_hashes);
+                ret
+            };
+
+            let next = BlockV2::new(
                 *self.block.hash(),
-                self.block.header().accumulated_seed(),
-                *self.block.header().state_root_hash(),
-                FinalizedBlock::random_with_specifics(
-                    self.rng,
-                    if is_successor_of_switch_block {
-                        self.block.header().era_id().successor()
-                    } else {
-                        self.block.header().era_id()
-                    },
-                    self.block.header().height() + 1,
-                    is_switch_block,
-                    Timestamp::now(),
-                    iter::empty(),
-                ),
-                validators,
+                *self.block.accumulated_seed(),
+                *self.block.state_root_hash(),
+                self.rng.gen(),
+                era_end,
+                Timestamp::now(),
+                next_block_era_id,
+                self.block.height() + 1,
                 self.protocol_version,
-            )
-            .unwrap();
+                PublicKey::random(self.rng),
+                transactions,
+                Default::default(),
+                gas_price,
+                Default::default(),
+            );
+
             self.block = next.clone();
             Some(next)
         }
@@ -2303,15 +2392,15 @@ mod tests {
         let mut rng = TestRng::new();
         let mut test_block = TestChainSpec::new(&mut rng, None, None, &[]);
         let mut block_batch = test_block.iter().take(100);
-        let mut parent_block: Block = block_batch.next().unwrap();
+        let mut parent_block: BlockV2 = block_batch.next().unwrap();
         for current_block in block_batch {
             assert_eq!(
-                current_block.header().height(),
-                parent_block.header().height() + 1,
+                current_block.height(),
+                parent_block.height() + 1,
                 "height should grow monotonically"
             );
             assert_eq!(
-                current_block.header().parent_hash(),
+                current_block.parent_hash(),
                 parent_block.hash(),
                 "block's parent should point at previous block"
             );
@@ -2349,9 +2438,9 @@ mod tests {
                 .map(|index| index + base_height)
                 .any(|index| index == block.height())
             {
-                assert!(block.header().is_switch_block())
+                assert!(block.is_switch_block())
             } else {
-                assert!(!block.header().is_switch_block())
+                assert!(!block.is_switch_block())
             }
         }
     }

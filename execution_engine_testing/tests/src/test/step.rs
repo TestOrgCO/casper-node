@@ -2,24 +2,19 @@ use num_traits::Zero;
 use once_cell::sync::Lazy;
 
 use casper_engine_test_support::{
-    utils, InMemoryWasmTestBuilder, StepRequestBuilder, WasmTestBuilder, DEFAULT_ACCOUNTS,
+    utils, LmdbWasmTestBuilder, StepRequestBuilder, DEFAULT_ACCOUNTS,
 };
-use casper_execution_engine::{
-    core::engine_state::{
-        genesis::{GenesisAccount, GenesisValidator},
-        RewardItem, SlashItem,
-    },
-    storage::global_state::in_memory::InMemoryGlobalState,
-};
+use casper_storage::data_access_layer::SlashItem;
 use casper_types::{
     system::{
         auction::{
-            Bids, DelegationRate, SeigniorageRecipientsSnapshot, BLOCK_REWARD,
+            BidsExt, DelegationRate, SeigniorageRecipientsSnapshot,
             SEIGNIORAGE_RECIPIENTS_SNAPSHOT_KEY,
         },
         mint::TOTAL_SUPPLY_KEY,
     },
-    CLValue, ContractHash, EraId, Key, Motes, ProtocolVersion, PublicKey, SecretKey, U512,
+    CLValue, EntityAddr, EraId, GenesisAccount, GenesisValidator, Key, Motes, ProtocolVersion,
+    PublicKey, SecretKey, U512,
 };
 
 static ACCOUNT_1_PK: Lazy<PublicKey> = Lazy::new(|| {
@@ -36,37 +31,31 @@ static ACCOUNT_2_PK: Lazy<PublicKey> = Lazy::new(|| {
 const ACCOUNT_2_BALANCE: u64 = 200_000_000;
 const ACCOUNT_2_BOND: u64 = 200_000_000;
 
-fn get_named_key(
-    builder: &mut InMemoryWasmTestBuilder,
-    contract_hash: ContractHash,
-    name: &str,
-) -> Key {
+fn get_named_key(builder: &mut LmdbWasmTestBuilder, entity_hash: EntityAddr, name: &str) -> Key {
     *builder
-        .get_contract(contract_hash)
-        .expect("should have contract")
-        .named_keys()
+        .get_named_keys(entity_hash)
         .get(name)
         .expect("should have bid purses")
 }
 
-fn initialize_builder() -> WasmTestBuilder<InMemoryGlobalState> {
-    let mut builder = InMemoryWasmTestBuilder::default();
+fn initialize_builder() -> LmdbWasmTestBuilder {
+    let mut builder = LmdbWasmTestBuilder::default();
 
     let accounts = {
         let mut tmp: Vec<GenesisAccount> = DEFAULT_ACCOUNTS.clone();
         let account_1 = GenesisAccount::account(
             ACCOUNT_1_PK.clone(),
-            Motes::new(ACCOUNT_1_BALANCE.into()),
+            Motes::new(ACCOUNT_1_BALANCE),
             Some(GenesisValidator::new(
-                Motes::new(ACCOUNT_1_BOND.into()),
+                Motes::new(ACCOUNT_1_BOND),
                 DelegationRate::zero(),
             )),
         );
         let account_2 = GenesisAccount::account(
             ACCOUNT_2_PK.clone(),
-            Motes::new(ACCOUNT_2_BALANCE.into()),
+            Motes::new(ACCOUNT_2_BALANCE),
             Some(GenesisValidator::new(
-                Motes::new(ACCOUNT_2_BOND.into()),
+                Motes::new(ACCOUNT_2_BOND),
                 DelegationRate::zero(),
             )),
         );
@@ -75,7 +64,7 @@ fn initialize_builder() -> WasmTestBuilder<InMemoryGlobalState> {
         tmp
     };
     let run_genesis_request = utils::create_run_genesis_request(accounts);
-    builder.run_genesis(&run_genesis_request);
+    builder.run_genesis(run_genesis_request);
     builder
 }
 
@@ -84,55 +73,49 @@ fn initialize_builder() -> WasmTestBuilder<InMemoryGlobalState> {
 #[test]
 fn should_step() {
     let mut builder = initialize_builder();
+    let step_request_builder = builder.step_request_builder();
 
-    let step_request = StepRequestBuilder::new()
-        .with_parent_state_hash(builder.get_post_state_hash())
-        .with_protocol_version(ProtocolVersion::V1_0_0)
+    let step_request = step_request_builder
         .with_slash_item(SlashItem::new(ACCOUNT_1_PK.clone()))
-        .with_reward_item(RewardItem::new(ACCOUNT_1_PK.clone(), BLOCK_REWARD / 2))
-        .with_reward_item(RewardItem::new(ACCOUNT_2_PK.clone(), BLOCK_REWARD / 2))
         .with_next_era_id(EraId::from(1))
         .build();
 
     let auction_hash = builder.get_auction_contract_hash();
 
-    let before_auction_seigniorage: SeigniorageRecipientsSnapshot =
-        builder.get_value(auction_hash, SEIGNIORAGE_RECIPIENTS_SNAPSHOT_KEY);
-
-    let bids_before_slashing: Bids = builder.get_bids();
-    assert!(
-        bids_before_slashing.contains_key(&ACCOUNT_1_PK),
-        "should have entry in the genesis bids table {:?}",
-        bids_before_slashing
+    let before_auction_seigniorage: SeigniorageRecipientsSnapshot = builder.get_value(
+        EntityAddr::System(auction_hash.value()),
+        SEIGNIORAGE_RECIPIENTS_SNAPSHOT_KEY,
     );
 
-    let bids_before_slashing: Bids = builder.get_bids();
+    let bids_before_slashing = builder.get_bids();
+    let account_1_bid = bids_before_slashing
+        .validator_bid(&ACCOUNT_1_PK)
+        .expect("should have account1 bid");
+    assert!(!account_1_bid.inactive(), "bid should not be inactive");
     assert!(
-        bids_before_slashing.contains_key(&ACCOUNT_1_PK),
-        "should have entry in bids table before slashing {:?}",
-        bids_before_slashing
+        !account_1_bid.staked_amount().is_zero(),
+        "bid amount should not be 0"
     );
 
-    builder.step(step_request).unwrap();
+    assert!(builder.step(step_request).is_success(), "should step");
 
-    let bids_after_slashing: Bids = builder.get_bids();
-    let account_1_bid = bids_after_slashing.get(&ACCOUNT_1_PK).unwrap();
-    assert!(account_1_bid.inactive());
-    assert!(account_1_bid.staked_amount().is_zero());
+    let bids_after_slashing = builder.get_bids();
+    assert!(bids_after_slashing.validator_bid(&ACCOUNT_1_PK).is_none());
 
-    let bids_after_slashing: Bids = builder.get_bids();
     assert_ne!(
         bids_before_slashing, bids_after_slashing,
         "bids table should be different before and after slashing"
     );
 
     // seigniorage snapshot should have changed after auction
-    let after_auction_seigniorage: SeigniorageRecipientsSnapshot =
-        builder.get_value(auction_hash, SEIGNIORAGE_RECIPIENTS_SNAPSHOT_KEY);
+    let after_auction_seigniorage: SeigniorageRecipientsSnapshot = builder.get_value(
+        EntityAddr::System(auction_hash.value()),
+        SEIGNIORAGE_RECIPIENTS_SNAPSHOT_KEY,
+    );
     assert!(
-        !before_auction_seigniorage
+        !after_auction_seigniorage
             .keys()
-            .all(|key| after_auction_seigniorage.contains_key(key)),
+            .all(|key| before_auction_seigniorage.contains_key(key)),
         "run auction should have changed seigniorage keys"
     );
 }
@@ -147,9 +130,13 @@ fn should_adjust_total_supply() {
     let mint_hash = builder.get_mint_contract_hash();
 
     // should check total supply before step
-    let total_supply_key = get_named_key(&mut builder, mint_hash, TOTAL_SUPPLY_KEY)
-        .into_uref()
-        .expect("should be uref");
+    let total_supply_key = get_named_key(
+        &mut builder,
+        EntityAddr::System(mint_hash.value()),
+        TOTAL_SUPPLY_KEY,
+    )
+    .into_uref()
+    .expect("should be uref");
 
     let starting_total_supply = CLValue::try_from(
         builder
@@ -166,12 +153,10 @@ fn should_adjust_total_supply() {
         .with_protocol_version(ProtocolVersion::V1_0_0)
         .with_slash_item(SlashItem::new(ACCOUNT_1_PK.clone()))
         .with_slash_item(SlashItem::new(ACCOUNT_2_PK.clone()))
-        .with_reward_item(RewardItem::new(ACCOUNT_1_PK.clone(), 0))
-        .with_reward_item(RewardItem::new(ACCOUNT_2_PK.clone(), BLOCK_REWARD / 2))
         .with_next_era_id(EraId::from(1))
         .build();
 
-    builder.step(step_request).unwrap();
+    assert!(builder.step(step_request).is_success(), "should step");
 
     let maybe_post_state_hash = Some(builder.get_post_state_hash());
 

@@ -1,8 +1,7 @@
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, LOCAL_GENESIS_REQUEST,
 };
-use casper_execution_engine::core::{engine_state, execution};
+use casper_execution_engine::{engine_state, execution::ExecError};
 use casper_types::{runtime_args, AccessRights, RuntimeArgs, URef};
 
 const REGRESSION_20220211_CONTRACT: &str = "regression_20220211.wasm";
@@ -31,9 +30,9 @@ fn regression_20220211_ret_as_session() {
     test(RET_AS_SESSION);
 }
 
-fn setup() -> InMemoryWasmTestBuilder {
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+fn setup() -> LmdbWasmTestBuilder {
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
     let install_request = ExecuteRequestBuilder::standard(
         *DEFAULT_ACCOUNT_ADDR,
         REGRESSION_20220211_CONTRACT,
@@ -64,7 +63,7 @@ fn test(entrypoint: &str) {
     assert!(
         matches!(
             error,
-            engine_state::Error::Exec(execution::Error::ForgedReference(forged_uref))
+            engine_state::Error::Exec(ExecError::ForgedReference(forged_uref))
             if forged_uref == expected_forged_uref
         ),
         "Expected revert but received {:?}",

@@ -12,8 +12,10 @@ use casper_contract::{
 
 use casper_types::{
     account::AccountHash,
-    contracts::{EntryPoint, EntryPointAccess, EntryPointType, EntryPoints, NamedKeys, Parameter},
-    CLType, CLTyped, U512,
+    addressable_entity::{
+        EntryPoint, EntryPointAccess, EntryPointType, EntryPoints, NamedKeys, Parameter,
+    },
+    CLType, CLTyped, EntryPointPayment, Key, U512,
 };
 
 const ENTRY_FUNCTION_NAME: &str = "transfer";
@@ -54,7 +56,8 @@ pub extern "C" fn call() {
             ],
             CLType::Unit,
             EntryPointAccess::Public,
-            EntryPointType::Contract,
+            EntryPointType::Called,
+            EntryPointPayment::Caller,
         );
         tmp.add_entry_point(entry_point);
         tmp
@@ -77,8 +80,9 @@ pub extern "C" fn call() {
         Some(named_keys),
         Some(PACKAGE_HASH_KEY_NAME.to_string()),
         Some(ACCESS_KEY_NAME.to_string()),
+        None,
     );
 
     runtime::put_key(CONTRACT_VERSION, storage::new_uref(contract_version).into());
-    runtime::put_key(HASH_KEY_NAME, contract_hash.into());
+    runtime::put_key(HASH_KEY_NAME, Key::contract_entity_key(contract_hash));
 }

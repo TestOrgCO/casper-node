@@ -1,39 +1,34 @@
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR,
-    MINIMUM_ACCOUNT_CREATION_BALANCE, PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, TransferRequestBuilder, DEFAULT_ACCOUNT_ADDR,
+    LOCAL_GENESIS_REQUEST, MINIMUM_ACCOUNT_CREATION_BALANCE,
 };
-use casper_execution_engine::core::{engine_state, execution};
-use casper_types::{account::AccountHash, runtime_args, RuntimeArgs, U512};
+use casper_execution_engine::{engine_state, execution::ExecError};
+use casper_types::{account::AccountHash, runtime_args, U512};
 
 const ALICE_ADDR: AccountHash = AccountHash::new([42; 32]);
 
 #[ignore]
 #[test]
 fn regression_20220222_escalate() {
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
-    let transfer_request = ExecuteRequestBuilder::transfer(
-        *DEFAULT_ACCOUNT_ADDR,
-        runtime_args! {
-            "target" => ALICE_ADDR,
-            "amount" => U512::from(MINIMUM_ACCOUNT_CREATION_BALANCE),
-            "id" => <Option<u64>>::None,
-        },
-    )
-    .build();
+    let transfer_request =
+        TransferRequestBuilder::new(MINIMUM_ACCOUNT_CREATION_BALANCE, ALICE_ADDR).build();
 
-    builder.exec(transfer_request).commit().expect_success();
+    builder
+        .transfer_and_commit(transfer_request)
+        .expect_success();
 
     let alice = builder
-        .get_account(ALICE_ADDR)
+        .get_entity_by_account_hash(ALICE_ADDR)
         .expect("should have account");
 
     let alice_main_purse = alice.main_purse();
 
     // Getting main purse URef to verify transfer
     let _source_purse = builder
-        .get_expected_account(*DEFAULT_ACCOUNT_ADDR)
+        .get_expected_addressable_entity_by_account_hash(*DEFAULT_ACCOUNT_ADDR)
         .main_purse();
 
     let session_args = runtime_args! {
@@ -54,7 +49,7 @@ fn regression_20220222_escalate() {
     assert!(
         matches!(
             error,
-            engine_state::Error::Exec(execution::Error::ForgedReference(forged_uref))
+            engine_state::Error::Exec(ExecError::ForgedReference(forged_uref))
             if forged_uref == alice_main_purse.into_add()
         ),
         "Expected revert but received {:?}",

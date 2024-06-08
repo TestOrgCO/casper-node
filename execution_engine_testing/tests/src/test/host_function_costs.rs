@@ -1,8 +1,7 @@
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, LOCAL_GENESIS_REQUEST,
 };
-use casper_types::{bytesrepr::Bytes, runtime_args, ContractHash, RuntimeArgs};
+use casper_types::{bytesrepr::Bytes, runtime_args, AddressableEntityHash, RuntimeArgs};
 
 const HOST_FUNCTION_COSTS_NAME: &str = "host_function_costs.wasm";
 const CONTRACT_KEY_NAME: &str = "contract";
@@ -20,7 +19,7 @@ const ARG_SIZE_FUNCTION_CALL_100_NAME: &str = "arg_size_function_call_100";
 fn should_measure_gas_cost() {
     // This test runs a contract that's after every call extends the same key with
     // more data
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
     let exec_request_1 = ExecuteRequestBuilder::standard(
         *DEFAULT_ACCOUNT_ADDR,
@@ -30,19 +29,19 @@ fn should_measure_gas_cost() {
     .build();
 
     // Create Accounts
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     builder.exec(exec_request_1).expect_success().commit();
 
     let account = builder
-        .get_account(*DEFAULT_ACCOUNT_ADDR)
+        .get_entity_with_named_keys_by_account_hash(*DEFAULT_ACCOUNT_ADDR)
         .expect("should have account");
 
-    let contract_hash: ContractHash = account
+    let contract_hash: AddressableEntityHash = account
         .named_keys()
         .get(CONTRACT_KEY_NAME)
         .expect("contract hash")
-        .into_hash()
+        .into_entity_hash_addr()
         .expect("should be hash")
         .into();
 
@@ -88,7 +87,7 @@ fn should_measure_gas_cost() {
 fn should_measure_nested_host_function_call_cost() {
     // This test runs a contract that's after every call extends the same key with
     // more data
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
     let exec_request_1 = ExecuteRequestBuilder::standard(
         *DEFAULT_ACCOUNT_ADDR,
@@ -98,19 +97,19 @@ fn should_measure_nested_host_function_call_cost() {
     .build();
 
     // Create Accounts
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     builder.exec(exec_request_1).expect_success().commit();
 
     let account = builder
-        .get_account(*DEFAULT_ACCOUNT_ADDR)
+        .get_entity_with_named_keys_by_account_hash(*DEFAULT_ACCOUNT_ADDR)
         .expect("should have account");
 
-    let contract_hash: ContractHash = account
+    let contract_hash: AddressableEntityHash = account
         .named_keys()
         .get(CONTRACT_KEY_NAME)
         .expect("contract hash")
-        .into_hash()
+        .into_entity_hash_addr()
         .expect("should be hash")
         .into();
 
@@ -166,7 +165,7 @@ fn should_measure_nested_host_function_call_cost() {
 #[test]
 fn should_measure_argument_size_in_host_function_call() {
     // Checks if calling a contract with large arguments affects costs
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
     let exec_request_1 = ExecuteRequestBuilder::standard(
         *DEFAULT_ACCOUNT_ADDR,
@@ -176,19 +175,19 @@ fn should_measure_argument_size_in_host_function_call() {
     .build();
 
     // Create Accounts
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     builder.exec(exec_request_1).expect_success().commit();
 
     let account = builder
-        .get_account(*DEFAULT_ACCOUNT_ADDR)
+        .get_entity_with_named_keys_by_account_hash(*DEFAULT_ACCOUNT_ADDR)
         .expect("should have account");
 
-    let contract_hash: ContractHash = account
+    let contract_hash: AddressableEntityHash = account
         .named_keys()
         .get(CONTRACT_KEY_NAME)
         .expect("contract hash")
-        .into_hash()
+        .into_entity_hash_addr()
         .expect("should be hash")
         .into();
 

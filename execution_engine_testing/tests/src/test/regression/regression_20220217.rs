@@ -1,11 +1,9 @@
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR,
-    MINIMUM_ACCOUNT_CREATION_BALANCE, PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, TransferRequestBuilder, DEFAULT_ACCOUNT_ADDR,
+    LOCAL_GENESIS_REQUEST, MINIMUM_ACCOUNT_CREATION_BALANCE,
 };
-use casper_execution_engine::core::{engine_state, execution};
-use casper_types::{
-    account::AccountHash, runtime_args, system::mint, AccessRights, RuntimeArgs, URef, U512,
-};
+use casper_execution_engine::{engine_state, execution::ExecError};
+use casper_types::{account::AccountHash, runtime_args, system::mint, AccessRights, URef, U512};
 
 const TRANSFER_TO_NAMED_PURSE_CONTRACT: &str = "transfer_to_named_purse.wasm";
 
@@ -23,11 +21,11 @@ fn regression_20220217_transfer_mint_by_hash_from_main_purse() {
     let mut builder = setup();
 
     let default_account = builder
-        .get_account(*DEFAULT_ACCOUNT_ADDR)
+        .get_entity_by_account_hash(*DEFAULT_ACCOUNT_ADDR)
         .expect("should have account");
     let default_purse = default_account.main_purse();
     let account_1 = builder
-        .get_account(ACCOUNT_1_ADDR)
+        .get_entity_by_account_hash(ACCOUNT_1_ADDR)
         .expect("should have account");
     let account_1_purse = account_1.main_purse();
 
@@ -52,7 +50,7 @@ fn regression_20220217_transfer_mint_by_hash_from_main_purse() {
     assert!(
         matches!(
             error,
-            engine_state::Error::Exec(execution::Error::ForgedReference(forged_uref))
+            engine_state::Error::Exec(ExecError::ForgedReference(forged_uref))
             if forged_uref == default_purse.with_access_rights(AccessRights::READ_ADD_WRITE),
         ),
         "Expected {:?} revert but received {:?}",
@@ -67,20 +65,20 @@ fn regression_20220217_transfer_mint_by_package_hash_from_main_purse() {
     let mut builder = setup();
 
     let default_account = builder
-        .get_account(*DEFAULT_ACCOUNT_ADDR)
+        .get_entity_by_account_hash(*DEFAULT_ACCOUNT_ADDR)
         .expect("should have account");
     let default_purse = default_account.main_purse();
     let account_1 = builder
-        .get_account(ACCOUNT_1_ADDR)
+        .get_entity_by_account_hash(ACCOUNT_1_ADDR)
         .expect("should have account");
     let account_1_purse = account_1.main_purse();
 
     let mint_hash = builder.get_mint_contract_hash();
 
     let mint = builder
-        .get_contract(mint_hash)
+        .get_addressable_entity(mint_hash)
         .expect("should have mint contract");
-    let mint_package_hash = mint.contract_package_hash();
+    let mint_package_hash = mint.package_hash();
 
     let exec_request = ExecuteRequestBuilder::versioned_contract_call_by_hash(
         ACCOUNT_1_ADDR,
@@ -102,7 +100,7 @@ fn regression_20220217_transfer_mint_by_package_hash_from_main_purse() {
     assert!(
         matches!(
             error,
-            engine_state::Error::Exec(execution::Error::ForgedReference(forged_uref))
+            engine_state::Error::Exec(ExecError::ForgedReference(forged_uref))
             if forged_uref == default_purse.with_access_rights(AccessRights::READ_ADD_WRITE),
         ),
         "Expected {:?} revert but received {:?}",
@@ -117,12 +115,18 @@ fn regression_20220217_mint_by_hash_transfer_from_other_purse() {
     let mut builder = setup();
 
     let account = builder
-        .get_account(*DEFAULT_ACCOUNT_ADDR)
+        .get_entity_with_named_keys_by_account_hash(*DEFAULT_ACCOUNT_ADDR)
         .expect("should have account");
-    let purse_1 = account.named_keys()[PURSE_1]
+    let purse_1 = account
+        .named_keys()
+        .get(PURSE_1)
+        .unwrap()
         .into_uref()
         .expect("should have purse 1");
-    let purse_2 = account.named_keys()[PURSE_2]
+    let purse_2 = account
+        .named_keys()
+        .get(PURSE_2)
+        .unwrap()
         .into_uref()
         .expect("should have purse 2");
 
@@ -151,17 +155,23 @@ fn regression_20220217_mint_by_hash_transfer_from_someones_purse() {
     let mut builder = setup();
 
     let account_1 = builder
-        .get_account(ACCOUNT_1_ADDR)
+        .get_entity_with_named_keys_by_account_hash(ACCOUNT_1_ADDR)
         .expect("should have account");
-    let account_1_purse = account_1.named_keys()[ACCOUNT_1_PURSE]
+    let account_1_purse = account_1
+        .named_keys()
+        .get(ACCOUNT_1_PURSE)
+        .unwrap()
         .into_uref()
         .expect("should have account main purse");
 
     let default_account = builder
-        .get_account(*DEFAULT_ACCOUNT_ADDR)
+        .get_entity_with_named_keys_by_account_hash(*DEFAULT_ACCOUNT_ADDR)
         .expect("should have account");
 
-    let purse_1 = default_account.named_keys()[PURSE_1]
+    let purse_1 = default_account
+        .named_keys()
+        .get(PURSE_1)
+        .unwrap()
         .into_uref()
         .expect("should have purse 1");
 
@@ -185,7 +195,7 @@ fn regression_20220217_mint_by_hash_transfer_from_someones_purse() {
     assert!(
         matches!(
             error,
-            engine_state::Error::Exec(execution::Error::ForgedReference(forged_uref))
+            engine_state::Error::Exec(ExecError::ForgedReference(forged_uref))
             if forged_uref == purse_1
         ),
         "Expected forged uref but received {:?}",
@@ -199,12 +209,18 @@ fn regression_20220217_should_not_transfer_funds_on_unrelated_purses() {
     let mut builder = setup();
 
     let account = builder
-        .get_account(*DEFAULT_ACCOUNT_ADDR)
+        .get_entity_with_named_keys_by_account_hash(*DEFAULT_ACCOUNT_ADDR)
         .expect("should have account");
-    let purse_1 = account.named_keys()[PURSE_1]
+    let purse_1 = account
+        .named_keys()
+        .get(PURSE_1)
+        .unwrap()
         .into_uref()
         .expect("should have purse 1");
-    let purse_2 = account.named_keys()[PURSE_2]
+    let purse_2 = account
+        .named_keys()
+        .get(PURSE_2)
+        .unwrap()
         .into_uref()
         .expect("should have purse 2");
 
@@ -230,7 +246,7 @@ fn regression_20220217_should_not_transfer_funds_on_unrelated_purses() {
     assert!(
         matches!(
             error,
-            engine_state::Error::Exec(execution::Error::ForgedReference(forged_uref))
+            engine_state::Error::Exec(ExecError::ForgedReference(forged_uref))
             if forged_uref == purse_1
         ),
         "Expected forged uref but received {:?}",
@@ -238,19 +254,12 @@ fn regression_20220217_should_not_transfer_funds_on_unrelated_purses() {
     );
 }
 
-fn setup() -> InMemoryWasmTestBuilder {
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+fn setup() -> LmdbWasmTestBuilder {
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
-    let fund_account_1_request = ExecuteRequestBuilder::transfer(
-        *DEFAULT_ACCOUNT_ADDR,
-        runtime_args! {
-            mint::ARG_TARGET => ACCOUNT_1_ADDR,
-            mint::ARG_AMOUNT => U512::from(MINIMUM_ACCOUNT_CREATION_BALANCE),
-            mint::ARG_ID => <Option<u64>>::None,
-        },
-    )
-    .build();
+    let fund_account_1_request =
+        TransferRequestBuilder::new(MINIMUM_ACCOUNT_CREATION_BALANCE, ACCOUNT_1_ADDR).build();
     let fund_purse_1_request = ExecuteRequestBuilder::standard(
         *DEFAULT_ACCOUNT_ADDR,
         TRANSFER_TO_NAMED_PURSE_CONTRACT,
@@ -280,9 +289,8 @@ fn setup() -> InMemoryWasmTestBuilder {
     .build();
 
     builder
-        .exec(fund_account_1_request)
-        .expect_success()
-        .commit();
+        .transfer_and_commit(fund_account_1_request)
+        .expect_success();
     builder.exec(fund_purse_1_request).expect_success().commit();
     builder.exec(fund_purse_2_request).expect_success().commit();
     builder.exec(fund_purse_3_request).expect_success().commit();
@@ -295,11 +303,11 @@ fn regression_20220217_auction_add_bid_directly() {
     let mut builder = setup();
 
     let default_account = builder
-        .get_account(*DEFAULT_ACCOUNT_ADDR)
+        .get_entity_by_account_hash(*DEFAULT_ACCOUNT_ADDR)
         .expect("should have account");
     let default_purse = default_account.main_purse();
     let account_1 = builder
-        .get_account(ACCOUNT_1_ADDR)
+        .get_entity_by_account_hash(ACCOUNT_1_ADDR)
         .expect("should have account");
     let account_1_purse = account_1.main_purse();
 
@@ -324,7 +332,7 @@ fn regression_20220217_auction_add_bid_directly() {
     assert!(
         matches!(
             error,
-            engine_state::Error::Exec(execution::Error::ForgedReference(forged_uref))
+            engine_state::Error::Exec(ExecError::ForgedReference(forged_uref))
             if forged_uref == default_purse.with_access_rights(AccessRights::READ_ADD_WRITE),
         ),
         "Expected {:?} revert but received {:?}",
@@ -339,11 +347,11 @@ fn regression_20220217_() {
     let mut builder = setup();
 
     let default_account = builder
-        .get_account(*DEFAULT_ACCOUNT_ADDR)
+        .get_entity_by_account_hash(*DEFAULT_ACCOUNT_ADDR)
         .expect("should have account");
     let default_purse = default_account.main_purse();
     let account_1 = builder
-        .get_account(ACCOUNT_1_ADDR)
+        .get_entity_by_account_hash(ACCOUNT_1_ADDR)
         .expect("should have account");
     let account_1_purse = account_1.main_purse();
 
@@ -368,7 +376,7 @@ fn regression_20220217_() {
     assert!(
         matches!(
             error,
-            engine_state::Error::Exec(execution::Error::ForgedReference(forged_uref))
+            engine_state::Error::Exec(ExecError::ForgedReference(forged_uref))
             if forged_uref == default_purse.with_access_rights(AccessRights::READ_ADD_WRITE),
         ),
         "Expected {:?} revert but received {:?}",
@@ -381,12 +389,12 @@ fn regression_20220217_() {
 #[test]
 fn mint_by_hash_transfer_should_fail_because_lack_of_target_uref_access() {
     // TODO create two named purses and verify we can pass source and target known non-main purses
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let default_account = builder
-        .get_account(*DEFAULT_ACCOUNT_ADDR)
+        .get_entity_by_account_hash(*DEFAULT_ACCOUNT_ADDR)
         .expect("should have account");
 
     let mint_hash = builder.get_mint_contract_hash();

@@ -5,11 +5,11 @@ use casper_wasm::{
 };
 
 use casper_engine_test_support::{
-    DeployItemBuilder, ExecuteRequestBuilder, InMemoryWasmTestBuilder, ARG_AMOUNT,
-    DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT, DEFAULT_WASM_CONFIG, PRODUCTION_RUN_GENESIS_REQUEST,
+    DeployItemBuilder, ExecuteRequestBuilder, LmdbWasmTestBuilder, ARG_AMOUNT,
+    DEFAULT_ACCOUNT_ADDR, DEFAULT_PAYMENT, DEFAULT_WASM_CONFIG, LOCAL_GENESIS_REQUEST,
 };
-use casper_execution_engine::{core::engine_state::Error, shared::wasm_prep::PreprocessingError};
-use casper_types::{contracts::DEFAULT_ENTRY_POINT_NAME, runtime_args, Gas, RuntimeArgs};
+use casper_execution_engine::{engine_state::Error, runtime::PreprocessingError};
+use casper_types::{addressable_entity::DEFAULT_ENTRY_POINT_NAME, runtime_args, Gas, RuntimeArgs};
 
 use crate::test::regression::test_utils::make_gas_counter_overflow;
 
@@ -39,33 +39,29 @@ fn make_session_code_with(instructions: Vec<Instruction>) -> Vec<u8> {
 #[ignore]
 #[test]
 fn should_fail_to_overflow_gas_counter() {
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
     let session_bytes = make_gas_counter_overflow();
 
-    let exec_request = {
-        let deploy_item = DeployItemBuilder::new()
-            .with_address(*DEFAULT_ACCOUNT_ADDR)
-            .with_session_bytes(session_bytes, RuntimeArgs::default())
-            .with_empty_payment_bytes(runtime_args! {
-                ARG_AMOUNT => *DEFAULT_PAYMENT
-            })
-            .with_authorization_keys(&[*DEFAULT_ACCOUNT_ADDR])
-            .with_deploy_hash([42; 32])
-            .build();
-        ExecuteRequestBuilder::from_deploy_item(deploy_item).build()
-    };
+    let deploy_item = DeployItemBuilder::new()
+        .with_address(*DEFAULT_ACCOUNT_ADDR)
+        .with_session_bytes(session_bytes, RuntimeArgs::default())
+        .with_standard_payment(runtime_args! {
+            ARG_AMOUNT => *DEFAULT_PAYMENT
+        })
+        .with_authorization_keys(&[*DEFAULT_ACCOUNT_ADDR])
+        .with_deploy_hash([42; 32])
+        .build();
+    let exec_request = ExecuteRequestBuilder::from_deploy_item(&deploy_item).build();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     builder.exec(exec_request).commit();
 
-    let responses = builder
+    let exec_result = builder
         .get_exec_result_owned(0)
         .expect("should have response");
-    let response = responses.get(0).expect("should have first element");
-
-    let lhs = response.as_error().expect("should have error");
+    let lhs = exec_result.error().expect("should have error");
     assert_matches!(
         lhs,
         Error::WasmPreprocessing(PreprocessingError::OperationForbiddenByGasRules)
@@ -149,22 +145,20 @@ fn should_correctly_measure_gas_for_opcodes() {
 
     let session_bytes = make_session_code_with(instructions);
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
-    let exec_request = {
-        let deploy_item = DeployItemBuilder::new()
-            .with_address(*DEFAULT_ACCOUNT_ADDR)
-            .with_session_bytes(session_bytes, RuntimeArgs::default())
-            .with_empty_payment_bytes(runtime_args! {
-                ARG_AMOUNT => *DEFAULT_PAYMENT
-            })
-            .with_authorization_keys(&[*DEFAULT_ACCOUNT_ADDR])
-            .with_deploy_hash([42; 32])
-            .build();
-        ExecuteRequestBuilder::from_deploy_item(deploy_item).build()
-    };
+    let deploy_item = DeployItemBuilder::new()
+        .with_address(*DEFAULT_ACCOUNT_ADDR)
+        .with_session_bytes(session_bytes, RuntimeArgs::default())
+        .with_standard_payment(runtime_args! {
+            ARG_AMOUNT => *DEFAULT_PAYMENT
+        })
+        .with_authorization_keys(&[*DEFAULT_ACCOUNT_ADDR])
+        .with_deploy_hash([42; 32])
+        .build();
+    let exec_request = ExecuteRequestBuilder::from_deploy_item(&deploy_item).build();
 
     builder.exec(exec_request).commit().expect_success();
 

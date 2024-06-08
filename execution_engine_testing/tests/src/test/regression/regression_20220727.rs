@@ -6,17 +6,17 @@ use casper_wasm::{
 };
 
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, LOCAL_GENESIS_REQUEST,
 };
 use casper_execution_engine::{
-    core::{engine_state, execution},
-    shared::wasm_prep::{
+    engine_state,
+    execution::ExecError,
+    runtime::{
         PreprocessingError, WasmValidationError, DEFAULT_BR_TABLE_MAX_SIZE, DEFAULT_MAX_GLOBALS,
         DEFAULT_MAX_PARAMETER_COUNT, DEFAULT_MAX_TABLE_SIZE,
     },
 };
-use casper_types::{contracts::DEFAULT_ENTRY_POINT_NAME, RuntimeArgs};
+use casper_types::{addressable_entity::DEFAULT_ENTRY_POINT_NAME, RuntimeArgs};
 
 use crate::wasm_utils;
 
@@ -54,8 +54,8 @@ fn make_oom_payload(initial: u32, maximum: Option<u32>) -> Vec<u8> {
 #[ignore]
 #[test]
 fn should_not_oom() {
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let initial_size_exceeded = vec![OOM_INIT, FAILURE_ONE_ABOVE_LIMIT];
 
@@ -113,8 +113,8 @@ fn should_not_oom() {
 #[ignore]
 #[test]
 fn should_pass_table_validation() {
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let passing_test_cases = vec![ALLOWED_NO_MAX, ALLOWED_LIMITS];
 
@@ -139,7 +139,7 @@ fn should_pass_elem_section() {
     assert!(
         matches!(
             elem_does_not_fit_err,
-            Some(engine_state::Error::Exec(execution::Error::Interpreter(ref msg)))
+            Some(engine_state::Error::Exec(ExecError::Interpreter(ref msg)))
             if msg == "elements segment does not fit"
         ),
         "{:?}",
@@ -185,8 +185,8 @@ fn test_element_section(
     //     (elem (i32.const 0) $foo1 $foo2 $foo3)
     // )
 
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let mut wat = String::new();
 
@@ -242,8 +242,8 @@ fn test_element_section(
 #[ignore]
 #[test]
 fn should_not_allow_more_than_one_table() {
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     // wabt::wat2wasm doesn't allow multiple tables so we'll go with a builder
 
@@ -375,8 +375,8 @@ fn should_allow_large_br_table() {
     let module_bytes = make_arbitrary_br_table(DEFAULT_BR_TABLE_MAX_SIZE as usize)
         .expect("should create module bytes");
 
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let exec_request = ExecuteRequestBuilder::module_bytes(
         *DEFAULT_ACCOUNT_ADDR,
@@ -394,8 +394,8 @@ fn should_not_allow_large_br_table() {
     let module_bytes =
         make_arbitrary_br_table(FAILING_BR_TABLE_SIZE).expect("should create module bytes");
 
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let exec_request = ExecuteRequestBuilder::module_bytes(
         *DEFAULT_ACCOUNT_ADDR,
@@ -464,8 +464,8 @@ fn should_allow_multiple_globals() {
     let module_bytes =
         make_arbitrary_global(DEFAULT_MAX_GLOBALS as usize).expect("should make arbitrary global");
 
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let exec_request = ExecuteRequestBuilder::module_bytes(
         *DEFAULT_ACCOUNT_ADDR,
@@ -483,8 +483,8 @@ fn should_not_allow_too_many_globals() {
     let module_bytes =
         make_arbitrary_global(FAILING_GLOBALS_SIZE).expect("should make arbitrary global");
 
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let exec_request = ExecuteRequestBuilder::module_bytes(
         *DEFAULT_ACCOUNT_ADDR,
@@ -515,8 +515,8 @@ fn should_verify_max_param_count() {
         wasm_utils::make_n_arg_call_bytes(DEFAULT_MAX_PARAMETER_COUNT as usize, "i32")
             .expect("should create wasm bytes");
 
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let exec_request = ExecuteRequestBuilder::module_bytes(
         *DEFAULT_ACCOUNT_ADDR,
@@ -530,8 +530,8 @@ fn should_verify_max_param_count() {
     let module_bytes_100_params =
         wasm_utils::make_n_arg_call_bytes(100, "i32").expect("should create wasm bytes");
 
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let exec_request = ExecuteRequestBuilder::module_bytes(
         *DEFAULT_ACCOUNT_ADDR,
@@ -549,8 +549,8 @@ fn should_not_allow_too_many_params() {
     let module_bytes = wasm_utils::make_n_arg_call_bytes(FAILING_PARAMS_COUNT, "i32")
         .expect("should create wasm bytes");
 
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let exec_request = ExecuteRequestBuilder::module_bytes(
         *DEFAULT_ACCOUNT_ADDR,
@@ -585,8 +585,8 @@ fn should_not_allow_to_import_gas_function() {
     )
     .unwrap();
 
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     let exec_request = ExecuteRequestBuilder::module_bytes(
         *DEFAULT_ACCOUNT_ADDR,
@@ -720,8 +720,8 @@ fn should_not_set_non_existing_global_above_declared_range() {
 
 fn test_non_existing_global(module_wat: &str, index: u32) {
     let module_bytes = wat::parse_str(module_wat).unwrap();
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
     let exec_request = ExecuteRequestBuilder::module_bytes(
         *DEFAULT_ACCOUNT_ADDR,
         module_bytes,

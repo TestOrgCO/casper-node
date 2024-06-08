@@ -9,6 +9,13 @@ All notable changes to this project will be documented in this file.  The format
 [comment]: <> (Fixed:      any bug fixes)
 [comment]: <> (Security:   in case of vulnerabilities)
 
+
+
+## [Unreleased] (node 2.0)
+
+### Added
+* Add support for a factory pattern on the host side.
+
 ## 7.0.1
 
 ### Changed
@@ -27,6 +34,7 @@ All notable changes to this project will be documented in this file.  The format
 
 
 
+## [Unreleased] (node 1.5.4)
 ## 7.0.0
 
 ### Added
@@ -34,7 +42,7 @@ All notable changes to this project will be documented in this file.  The format
 * Add chainspec option `core.allow_auction_bids` that, if enabled, allows auction entrypoints `delegate` and `add_bid` to operate. Disabling this option makes sense only for private chains.
 * Add chainspec option `core.compute_rewards` that, if enabled, computes rewards for each era. Disabling this option makes sense only for private chains.
 * Add chainspec option `core.refund_handling` that specifies how payment refunds are handled.
-* Add chainspec option `core.fee_handling` that specifes how transaction fees are handled.
+* Add chainspec option `core.fee_handling` that specifies how transaction fees are handled.
 * Add chainspec option `core.administrators` that, if set, contains list of administrator accounts. This option makes sense only for private chains.
 * Add support for a new FFI function `enable_contract_version` for enabling a specific version of a contract.
 
@@ -53,7 +61,7 @@ All notable changes to this project will be documented in this file.  The format
 
 ### Changed
 * Default value for `max_stack_height` is increased to 500.
-* Replaced usage of `parity-wasm` and `wasmi` with Casper forks `casper-wasm` and `casper-wasmi` respectively.
+* Replace usage of `parity-wasm` and `wasmi` with Casper forks `casper-wasm` and `casper-wasmi` respectively.
 
 ### Fixed
 * Fix incorrect handling of unbonding purses for validators that were also evicted in that era.

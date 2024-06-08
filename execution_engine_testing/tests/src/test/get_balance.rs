@@ -1,19 +1,16 @@
 use once_cell::sync::Lazy;
 
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    LmdbWasmTestBuilder, TransferRequestBuilder, LOCAL_GENESIS_REQUEST,
 };
-use casper_execution_engine::{core, core::ValidationError};
-use casper_hashing::Digest;
+use casper_storage::{
+    data_access_layer::BalanceIdentifier,
+    tracking_copy::{self, ValidationError},
+};
 use casper_types::{
-    account::AccountHash, runtime_args, AccessRights, Key, PublicKey, RuntimeArgs, SecretKey, URef,
+    account::AccountHash, AccessRights, Digest, Key, ProtocolVersion, PublicKey, SecretKey, URef,
     U512,
 };
-
-const TRANSFER_ARG_TARGET: &str = "target";
-const TRANSFER_ARG_AMOUNT: &str = "amount";
-const TRANSFER_ARG_ID: &str = "id";
 
 static ALICE_KEY: Lazy<PublicKey> = Lazy::new(|| {
     let secret_key = SecretKey::ed25519_from_bytes([3; SecretKey::ED25519_LENGTH]).unwrap();
@@ -26,31 +23,32 @@ static TRANSFER_AMOUNT_1: Lazy<U512> = Lazy::new(|| U512::from(100_000_000));
 #[ignore]
 #[test]
 fn get_balance_should_work() {
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let protocol_version = ProtocolVersion::V2_0_0;
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
-    let transfer_request = ExecuteRequestBuilder::transfer(
-        *DEFAULT_ACCOUNT_ADDR,
-        runtime_args! {
-            TRANSFER_ARG_TARGET => *ALICE_ADDR,
-            TRANSFER_ARG_AMOUNT => *TRANSFER_AMOUNT_1,
-            TRANSFER_ARG_ID => <Option<u64>>::None,
-        },
-    )
-    .build();
+    let block_time = 1_000_000;
+    let transfer_request = TransferRequestBuilder::new(*TRANSFER_AMOUNT_1, *ALICE_ADDR)
+        .with_block_time(block_time)
+        .build();
 
-    builder.exec(transfer_request).commit().expect_success();
+    builder
+        .transfer_and_commit(transfer_request)
+        .expect_success();
 
     let alice_account = builder
-        .get_account(*ALICE_ADDR)
+        .get_entity_by_account_hash(*ALICE_ADDR)
         .expect("should have Alice's account");
 
     let alice_main_purse = alice_account.main_purse();
 
-    let alice_balance_result = builder.get_purse_balance_result(alice_main_purse);
+    let alice_balance_result = builder.get_purse_balance_result_with_proofs(
+        protocol_version,
+        BalanceIdentifier::Purse(alice_main_purse),
+    );
 
     let alice_balance = alice_balance_result
-        .motes()
+        .available_balance()
         .cloned()
         .expect("should have motes");
 
@@ -58,9 +56,15 @@ fn get_balance_should_work() {
 
     let state_root_hash = builder.get_post_state_hash();
 
-    let balance_proof = alice_balance_result.proof().expect("should have proofs");
+    let proofs_result = alice_balance_result
+        .proofs_result()
+        .expect("should have proofs result");
+    let balance_proof = proofs_result
+        .total_balance_proof()
+        .expect("should have proofs")
+        .clone();
 
-    assert!(core::validate_balance_proof(
+    assert!(tracking_copy::validate_balance_proof(
         &state_root_hash,
         &balance_proof,
         alice_main_purse.into(),
@@ -70,7 +74,7 @@ fn get_balance_should_work() {
 
     let bogus_key = Key::Hash([1u8; 32]);
     assert_eq!(
-        core::validate_balance_proof(
+        tracking_copy::validate_balance_proof(
             &state_root_hash,
             &balance_proof,
             bogus_key.to_owned(),
@@ -81,13 +85,18 @@ fn get_balance_should_work() {
 
     let bogus_uref: Key = Key::URef(URef::new([3u8; 32], AccessRights::READ_ADD_WRITE));
     assert_eq!(
-        core::validate_balance_proof(&state_root_hash, &balance_proof, bogus_uref, &alice_balance,),
+        tracking_copy::validate_balance_proof(
+            &state_root_hash,
+            &balance_proof,
+            bogus_uref,
+            &alice_balance,
+        ),
         Err(ValidationError::UnexpectedKey)
     );
 
     let bogus_hash = Digest::hash([5u8; 32]);
     assert_eq!(
-        core::validate_balance_proof(
+        tracking_copy::validate_balance_proof(
             &bogus_hash,
             &balance_proof,
             alice_main_purse.into(),
@@ -98,7 +107,7 @@ fn get_balance_should_work() {
 
     let bogus_motes = U512::from(1337);
     assert_eq!(
-        core::validate_balance_proof(
+        tracking_copy::validate_balance_proof(
             &state_root_hash,
             &balance_proof,
             alice_main_purse.into(),
@@ -111,31 +120,30 @@ fn get_balance_should_work() {
 #[ignore]
 #[test]
 fn get_balance_using_public_key_should_work() {
-    let mut builder = InMemoryWasmTestBuilder::default();
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let protocol_version = ProtocolVersion::V2_0_0;
+    let mut builder = LmdbWasmTestBuilder::default();
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
-    let transfer_request = ExecuteRequestBuilder::transfer(
-        *DEFAULT_ACCOUNT_ADDR,
-        runtime_args! {
-            TRANSFER_ARG_TARGET => *ALICE_ADDR,
-            TRANSFER_ARG_AMOUNT => *TRANSFER_AMOUNT_1,
-            TRANSFER_ARG_ID => <Option<u64>>::None,
-        },
-    )
-    .build();
+    let block_time = 1_000_000;
+    let transfer_request = TransferRequestBuilder::new(*TRANSFER_AMOUNT_1, *ALICE_ADDR)
+        .with_block_time(block_time)
+        .build();
 
-    builder.exec(transfer_request).commit().expect_success();
+    builder
+        .transfer_and_commit(transfer_request)
+        .expect_success();
 
     let alice_account = builder
-        .get_account(*ALICE_ADDR)
+        .get_entity_by_account_hash(*ALICE_ADDR)
         .expect("should have Alice's account");
 
     let alice_main_purse = alice_account.main_purse();
 
-    let alice_balance_result = builder.get_public_key_balance_result(ALICE_KEY.clone());
+    let alice_balance_result =
+        builder.get_public_key_balance_result_with_proofs(protocol_version, ALICE_KEY.clone());
 
     let alice_balance = alice_balance_result
-        .motes()
+        .available_balance()
         .cloned()
         .expect("should have motes");
 
@@ -143,9 +151,15 @@ fn get_balance_using_public_key_should_work() {
 
     let state_root_hash = builder.get_post_state_hash();
 
-    let balance_proof = alice_balance_result.proof().expect("should have proofs");
+    let proofs_result = alice_balance_result
+        .proofs_result()
+        .expect("should have proofs result");
+    let balance_proof = proofs_result
+        .total_balance_proof()
+        .expect("should have proofs")
+        .clone();
 
-    assert!(core::validate_balance_proof(
+    assert!(tracking_copy::validate_balance_proof(
         &state_root_hash,
         &balance_proof,
         alice_main_purse.into(),
@@ -155,7 +169,7 @@ fn get_balance_using_public_key_should_work() {
 
     let bogus_key = Key::Hash([1u8; 32]);
     assert_eq!(
-        core::validate_balance_proof(
+        tracking_copy::validate_balance_proof(
             &state_root_hash,
             &balance_proof,
             bogus_key.to_owned(),
@@ -166,13 +180,18 @@ fn get_balance_using_public_key_should_work() {
 
     let bogus_uref: Key = Key::URef(URef::new([3u8; 32], AccessRights::READ_ADD_WRITE));
     assert_eq!(
-        core::validate_balance_proof(&state_root_hash, &balance_proof, bogus_uref, &alice_balance,),
+        tracking_copy::validate_balance_proof(
+            &state_root_hash,
+            &balance_proof,
+            bogus_uref,
+            &alice_balance,
+        ),
         Err(ValidationError::UnexpectedKey)
     );
 
     let bogus_hash = Digest::hash([5u8; 32]);
     assert_eq!(
-        core::validate_balance_proof(
+        tracking_copy::validate_balance_proof(
             &bogus_hash,
             &balance_proof,
             alice_main_purse.into(),
@@ -183,7 +202,7 @@ fn get_balance_using_public_key_should_work() {
 
     let bogus_motes = U512::from(1337);
     assert_eq!(
-        core::validate_balance_proof(
+        tracking_copy::validate_balance_proof(
             &state_root_hash,
             &balance_proof,
             alice_main_purse.into(),

@@ -2,20 +2,17 @@ use num_traits::Zero;
 use once_cell::sync::Lazy;
 
 use casper_engine_test_support::{
-    utils, ExecuteRequestBuilder, InMemoryWasmTestBuilder, StepRequestBuilder, DEFAULT_ACCOUNTS,
+    utils, ExecuteRequestBuilder, LmdbWasmTestBuilder, StepRequestBuilder, DEFAULT_ACCOUNTS,
     DEFAULT_ACCOUNT_ADDR, DEFAULT_ACCOUNT_INITIAL_BALANCE, DEFAULT_GENESIS_TIMESTAMP_MILLIS,
     DEFAULT_LOCKED_FUNDS_PERIOD_MILLIS, MINIMUM_ACCOUNT_CREATION_BALANCE,
     TIMESTAMP_MILLIS_INCREMENT,
 };
-use casper_execution_engine::core::engine_state::{
-    engine_config::DEFAULT_MINIMUM_DELEGATION_AMOUNT, genesis::GenesisValidator, GenesisAccount,
-    RewardItem,
-};
+use casper_execution_engine::engine_state::engine_config::DEFAULT_MINIMUM_DELEGATION_AMOUNT;
 use casper_types::{
     account::AccountHash,
     runtime_args,
-    system::auction::{self, DelegationRate, BLOCK_REWARD, INITIAL_ERA_ID},
-    Motes, ProtocolVersion, PublicKey, RuntimeArgs, SecretKey, U512,
+    system::auction::{self, DelegationRate, INITIAL_ERA_ID},
+    GenesisAccount, GenesisValidator, Motes, ProtocolVersion, PublicKey, SecretKey, U512,
 };
 
 const CONTRACT_TRANSFER_TO_ACCOUNT: &str = "transfer_to_account_u512.wasm";
@@ -40,17 +37,17 @@ fn should_run_ee_1152_regression_test() {
     let accounts = {
         let validator_1 = GenesisAccount::account(
             VALIDATOR_1.clone(),
-            Motes::new(DEFAULT_ACCOUNT_INITIAL_BALANCE.into()),
+            Motes::new(DEFAULT_ACCOUNT_INITIAL_BALANCE),
             Some(GenesisValidator::new(
-                Motes::new(VALIDATOR_STAKE.into()),
+                Motes::new(VALIDATOR_STAKE),
                 DelegationRate::zero(),
             )),
         );
         let validator_2 = GenesisAccount::account(
             DELEGATOR_1.clone(),
-            Motes::new(DEFAULT_ACCOUNT_INITIAL_BALANCE.into()),
+            Motes::new(DEFAULT_ACCOUNT_INITIAL_BALANCE),
             Some(GenesisValidator::new(
-                Motes::new(VALIDATOR_STAKE.into()),
+                Motes::new(VALIDATOR_STAKE),
                 DelegationRate::zero(),
             )),
         );
@@ -79,9 +76,9 @@ fn should_run_ee_1152_regression_test() {
     )
     .build();
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
-    builder.run_genesis(&run_genesis_request);
+    builder.run_genesis(run_genesis_request);
 
     builder.exec(fund_request_1).commit().expect_success();
     builder.exec(fund_request_2).commit().expect_success();
@@ -135,7 +132,7 @@ fn should_run_ee_1152_regression_test() {
 
     assert!(!era_validators.is_empty());
 
-    let (era_id, trusted_era_validators) = era_validators
+    let (era_id, _) = era_validators
         .into_iter()
         .last()
         .expect("should have last element");
@@ -143,7 +140,7 @@ fn should_run_ee_1152_regression_test() {
 
     builder.exec(undelegate_request).expect_success().commit();
 
-    let mut step_request = StepRequestBuilder::new()
+    let step_request = StepRequestBuilder::new()
         .with_parent_state_hash(builder.get_post_state_hash())
         .with_protocol_version(ProtocolVersion::V1_0_0)
         // Next era id is used for returning future era validators, which we don't need to inspect
@@ -151,12 +148,7 @@ fn should_run_ee_1152_regression_test() {
         .with_next_era_id(era_id)
         .with_era_end_timestamp_millis(timestamp_millis);
 
-    for (public_key, _stake) in trusted_era_validators.clone().into_iter() {
-        let reward_amount = BLOCK_REWARD / trusted_era_validators.len() as u64;
-        step_request = step_request.with_reward_item(RewardItem::new(public_key, reward_amount));
-    }
-
-    builder.step(step_request.build()).unwrap();
+    builder.step(step_request.build());
 
     builder.run_auction(timestamp_millis, Vec::new());
 }

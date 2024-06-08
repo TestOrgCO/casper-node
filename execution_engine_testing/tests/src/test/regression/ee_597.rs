@@ -1,12 +1,12 @@
 use once_cell::sync::Lazy;
 
 use casper_engine_test_support::{
-    utils, ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNTS,
+    utils, ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNTS,
     MINIMUM_ACCOUNT_CREATION_BALANCE,
 };
-use casper_execution_engine::core::engine_state::GenesisAccount;
 use casper_types::{
-    account::AccountHash, system::auction, ApiError, Motes, PublicKey, RuntimeArgs, SecretKey,
+    account::AccountHash, system::auction, ApiError, GenesisAccount, Motes, PublicKey, RuntimeArgs,
+    SecretKey,
 };
 
 const CONTRACT_EE_597_REGRESSION: &str = "ee_597_regression.wasm";
@@ -23,11 +23,8 @@ const VALID_BALANCE: u64 = MINIMUM_ACCOUNT_CREATION_BALANCE;
 fn should_fail_when_bonding_amount_is_zero_ee_597_regression() {
     let accounts = {
         let mut tmp: Vec<GenesisAccount> = DEFAULT_ACCOUNTS.clone();
-        let account = GenesisAccount::account(
-            VALID_PUBLIC_KEY.clone(),
-            Motes::new(VALID_BALANCE.into()),
-            None,
-        );
+        let account =
+            GenesisAccount::account(VALID_PUBLIC_KEY.clone(), Motes::new(VALID_BALANCE), None);
         tmp.push(account);
         tmp
     };
@@ -41,17 +38,13 @@ fn should_fail_when_bonding_amount_is_zero_ee_597_regression() {
     )
     .build();
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
     builder
-        .run_genesis(&run_genesis_request)
+        .run_genesis(run_genesis_request)
         .exec(exec_request)
         .commit();
 
-    let response = builder
-        .get_exec_result_owned(0)
-        .expect("should have a response");
-
-    let error_message = utils::get_error_message(response);
+    let error_message = builder.get_error_message().expect("should have a result");
 
     // Error::BondTooSmall => 5,
     assert!(

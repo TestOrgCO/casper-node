@@ -11,7 +11,15 @@ All notable changes to this project will be documented in this file.  The format
 
 
 
-## Unreleased
+## [Unreleased] (node 2.0)
+
+### Added
+* Add new `EntryPointType::Install`, `EntryPointType::Normal`, `EntryPointAccess::Abstract` variants to support implementation of a factory pattern.
+* Add new types (`types/src/binary_port`) to support the BinaryPort interface
+
+
+
+## [Unreleased] (node 1.5.4)
 
 ### Changed
 * Remove filesystem I/O functionality from the `std` feature, and gated this behind a new feature `std-fs-io` which depends upon `std`.

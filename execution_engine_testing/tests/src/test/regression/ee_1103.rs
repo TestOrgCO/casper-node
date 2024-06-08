@@ -2,16 +2,15 @@ use num_traits::Zero;
 use once_cell::sync::Lazy;
 
 use casper_engine_test_support::{
-    utils, ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNTS,
+    utils, ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNTS,
     DEFAULT_GENESIS_TIMESTAMP_MILLIS, DEFAULT_LOCKED_FUNDS_PERIOD_MILLIS,
     MINIMUM_ACCOUNT_CREATION_BALANCE, SYSTEM_ADDR, TIMESTAMP_MILLIS_INCREMENT,
 };
-use casper_execution_engine::core::engine_state::{genesis::GenesisValidator, GenesisAccount};
 use casper_types::{
     account::AccountHash,
     runtime_args,
     system::auction::{DelegationRate, ARG_DELEGATOR, ARG_VALIDATOR},
-    Motes, PublicKey, RuntimeArgs, SecretKey, U512,
+    GenesisAccount, GenesisValidator, Motes, PublicKey, SecretKey, U512,
 };
 
 const ARG_TARGET: &str = "target";
@@ -158,10 +157,10 @@ fn validator_scores_should_reflect_delegates() {
     let mut timestamp_millis =
         DEFAULT_GENESIS_TIMESTAMP_MILLIS + DEFAULT_LOCKED_FUNDS_PERIOD_MILLIS;
 
-    let mut builder = InMemoryWasmTestBuilder::default();
+    let mut builder = LmdbWasmTestBuilder::default();
 
     let run_genesis_request = utils::create_run_genesis_request(accounts);
-    builder.run_genesis(&run_genesis_request);
+    builder.run_genesis(run_genesis_request);
 
     for request in post_genesis_requests {
         builder.exec(request).commit().expect_success();

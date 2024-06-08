@@ -1,16 +1,22 @@
+use std::sync::Arc;
+
 use casper_engine_test_support::{
-    ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_ACCOUNT_ADDR,
-    PRODUCTION_RUN_GENESIS_REQUEST,
+    ExecuteRequestBuilder, LmdbWasmTestBuilder, DEFAULT_ACCOUNT_ADDR, LOCAL_GENESIS_REQUEST,
 };
-use casper_execution_engine::storage::global_state::in_memory::InMemoryGlobalState;
+use casper_storage::global_state::{
+    state::{lmdb::LmdbGlobalState, StateProvider},
+    transaction_source::lmdb::LmdbEnvironment,
+    trie_store::lmdb::LmdbTrieStore,
+};
 use casper_types::RuntimeArgs;
+use lmdb::DatabaseFlags;
 
 const CONTRACT_DO_NOTHING: &str = "do_nothing.wasm";
 
 #[ignore]
 #[test]
 fn regression_test_genesis_hash_mismatch() {
-    let mut builder_base = InMemoryWasmTestBuilder::default();
+    let mut builder_base = LmdbWasmTestBuilder::default();
 
     let exec_request_1 = ExecuteRequestBuilder::standard(
         *DEFAULT_ACCOUNT_ADDR,
@@ -20,16 +26,26 @@ fn regression_test_genesis_hash_mismatch() {
     .build();
 
     // Step 1.
-    let builder = builder_base.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    let builder = builder_base.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     // This is trie's post state hash after calling run_genesis endpoint.
     // Step 1a)
     let genesis_run_hash = builder.get_genesis_hash();
-    let genesis_transforms = builder.get_genesis_transforms().clone();
+    let genesis_transforms = builder.get_genesis_effects().clone();
 
     let empty_root_hash = {
-        let gs = InMemoryGlobalState::empty().expect("Empty GlobalState.");
-        gs.empty_root_hash()
+        let gs = {
+            let tempdir = tempfile::tempdir().expect("should create tempdir");
+            let lmdb_environment = LmdbEnvironment::new(tempdir.path(), 1024 * 1024, 32, false)
+                .expect("should create lmdb environment");
+            let lmdb_trie_store =
+                LmdbTrieStore::new(&lmdb_environment, None, DatabaseFlags::default())
+                    .expect("should create lmdb trie store");
+
+            LmdbGlobalState::empty(Arc::new(lmdb_environment), Arc::new(lmdb_trie_store), 6)
+                .expect("Empty GlobalState.")
+        };
+        gs.empty_root()
     };
 
     // This is trie's post state hash after committing genesis effects on top of
@@ -46,11 +62,11 @@ fn regression_test_genesis_hash_mismatch() {
 
     // No step 3.
     // Step 4.
-    builder.run_genesis(&PRODUCTION_RUN_GENESIS_REQUEST);
+    builder.run_genesis(LOCAL_GENESIS_REQUEST.clone());
 
     // Step 4a)
     let second_genesis_run_hash = builder.get_genesis_hash();
-    let second_genesis_transforms = builder.get_genesis_transforms().clone();
+    let second_genesis_transforms = builder.get_genesis_effects().clone();
 
     // Step 4b)
     let second_genesis_transforms_hash = builder

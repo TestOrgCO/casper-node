@@ -1,7 +1,10 @@
 use std::{collections::BTreeMap, thread, time::Duration};
 
-use casper_types::testing::TestRng;
 use num_rational::Ratio;
+
+use casper_types::{
+    testing::TestRng, ChainNameDigest, FinalitySignatureV2, TestBlockBuilder, Transaction,
+};
 
 use crate::components::consensus::tests::utils::{ALICE_PUBLIC_KEY, ALICE_SECRET_KEY};
 
@@ -10,9 +13,9 @@ use super::*;
 #[test]
 fn handle_acceptance_promotes_and_disqualifies_peers() {
     let mut rng = TestRng::new();
-    let block = Block::random(&mut rng);
+    let block = TestBlockBuilder::new().build(&mut rng);
     let mut builder = BlockBuilder::new(
-        block.header().block_hash(),
+        *block.hash(),
         false,
         1,
         TimeDiff::from_seconds(1),
@@ -98,7 +101,7 @@ fn handle_acceptance_promotes_and_disqualifies_peers() {
 #[test]
 fn handle_acceptance_unlatches_builder() {
     let mut rng = TestRng::new();
-    let block = Block::random(&mut rng);
+    let block = TestBlockBuilder::new().build(&mut rng);
     let mut builder = BlockBuilder::new(
         block.header().block_hash(),
         false,
@@ -163,9 +166,9 @@ fn handle_acceptance_unlatches_builder() {
 #[test]
 fn register_era_validator_weights() {
     let mut rng = TestRng::new();
-    let block = Block::random(&mut rng);
+    let block = TestBlockBuilder::new().build(&mut rng);
     let mut builder = BlockBuilder::new(
-        block.header().block_hash(),
+        *block.hash(),
         false,
         1,
         TimeDiff::from_seconds(1),
@@ -192,10 +195,10 @@ fn register_era_validator_weights() {
     assert!(builder.validator_weights.is_none());
     assert_eq!(latest_timestamp, builder.last_progress);
     // Set the era of the builder to the random block's era.
-    builder.era_id = Some(block.header().era_id());
+    builder.era_id = Some(block.era_id());
     // Add weights for that era to the validator matrix.
     let weights = EraValidatorWeights::new(
-        block.header().era_id(),
+        block.era_id(),
         BTreeMap::from([(ALICE_PUBLIC_KEY.clone(), 100.into())]),
         Ratio::new(1, 3),
     );
@@ -208,13 +211,14 @@ fn register_era_validator_weights() {
 }
 
 #[test]
-fn register_finalized_block() {
+fn register_executable_block() {
     let mut rng = TestRng::new();
+    let chain_name_hash = ChainNameDigest::random(&mut rng);
     // Create a random block.
-    let block = Block::random(&mut rng);
+    let block = TestBlockBuilder::new().build(&mut rng);
     // Create a builder for the block.
     let mut builder = BlockBuilder::new(
-        block.header().block_hash(),
+        *block.hash(),
         false,
         1,
         TimeDiff::from_seconds(1),
@@ -224,7 +228,7 @@ fn register_finalized_block() {
     let mut latest_timestamp = builder.last_progress;
     // Create mock era weights for the block's era.
     let weights = EraValidatorWeights::new(
-        block.header().era_id(),
+        block.era_id(),
         BTreeMap::from([(ALICE_PUBLIC_KEY.clone(), 100.into())]),
         Ratio::new(1, 3),
     );
@@ -233,31 +237,33 @@ fn register_finalized_block() {
         vec![ALICE_PUBLIC_KEY.clone()],
         LegacyRequiredFinality::Strict,
     );
-    let sig = FinalitySignature::create(
+    let sig = FinalitySignatureV2::create(
         *block.hash(),
-        block.header().era_id(),
+        block.height(),
+        block.era_id(),
+        chain_name_hash,
         &ALICE_SECRET_KEY,
-        ALICE_PUBLIC_KEY.clone(),
     );
     assert_eq!(
-        signature_acquisition.apply_signature(sig, &weights),
+        signature_acquisition.apply_signature(sig.into(), &weights),
         Acceptance::NeededIt
     );
     // Set the builder's state to `HaveStrictFinalitySignatures`.
-    let finalized_block = FinalizedBlock::from(block.clone());
+    let expected_txns = vec![Transaction::random(&mut rng)];
+    let executable_block =
+        ExecutableBlock::from_block_and_transactions(block.clone(), expected_txns.clone());
     builder.acquisition_state = BlockAcquisitionState::HaveStrictFinalitySignatures(
-        Box::new(block.clone()),
+        Box::new(block.clone().into()),
         signature_acquisition.clone(),
     );
-    let expected_deploys = vec![Deploy::random(&mut rng)];
 
     // Register the finalized block.
     thread::sleep(Duration::from_millis(5));
-    builder.register_made_finalized_block(finalized_block.clone(), expected_deploys.clone());
+    builder.register_made_executable_block(executable_block.clone());
     match &builder.acquisition_state {
-        BlockAcquisitionState::HaveFinalizedBlock(actual_block, _, actual_deploys, enqueued) => {
-            assert_eq!(*actual_block.hash(), *block.hash());
-            assert_eq!(expected_deploys, *actual_deploys);
+        BlockAcquisitionState::HaveExecutableBlock(actual_block, executable_block, enqueued) => {
+            assert_eq!(actual_block.hash(), block.hash());
+            assert_eq!(expected_txns, *executable_block.transactions);
             assert!(!enqueued);
         }
         _ => panic!("Unexpected outcome in registering finalized block"),
@@ -270,12 +276,12 @@ fn register_finalized_block() {
     builder.should_fetch_execution_state = true;
     // Reset the state to `HaveStrictFinalitySignatures`.
     builder.acquisition_state = BlockAcquisitionState::HaveStrictFinalitySignatures(
-        Box::new(block),
+        Box::new(block.into()),
         signature_acquisition.clone(),
     );
     // Register the finalized block. This should fail on historical builders.
     thread::sleep(Duration::from_millis(5));
-    builder.register_made_finalized_block(finalized_block, expected_deploys);
+    builder.register_made_executable_block(executable_block);
     assert!(builder.is_failed());
     assert_ne!(latest_timestamp, builder.last_progress);
 }
@@ -283,11 +289,12 @@ fn register_finalized_block() {
 #[test]
 fn register_block_execution() {
     let mut rng = TestRng::new();
+    let chain_name_hash = ChainNameDigest::random(&mut rng);
     // Create a random block.
-    let block = Block::random(&mut rng);
+    let block = TestBlockBuilder::new().build(&mut rng);
     // Create a builder for the block.
     let mut builder = BlockBuilder::new(
-        block.header().block_hash(),
+        *block.hash(),
         false,
         1,
         TimeDiff::from_seconds(1),
@@ -297,7 +304,7 @@ fn register_block_execution() {
     let mut latest_timestamp = builder.last_progress;
     // Create mock era weights for the block's era.
     let weights = EraValidatorWeights::new(
-        block.header().era_id(),
+        block.era_id(),
         BTreeMap::from([(ALICE_PUBLIC_KEY.clone(), 100.into())]),
         Ratio::new(1, 3),
     );
@@ -306,24 +313,24 @@ fn register_block_execution() {
         vec![ALICE_PUBLIC_KEY.clone()],
         LegacyRequiredFinality::Strict,
     );
-    let sig = FinalitySignature::create(
+    let sig = FinalitySignatureV2::create(
         *block.hash(),
-        block.header().era_id(),
+        block.height(),
+        block.era_id(),
+        chain_name_hash,
         &ALICE_SECRET_KEY,
-        ALICE_PUBLIC_KEY.clone(),
     );
     assert_eq!(
-        signature_acquisition.apply_signature(sig, &weights),
+        signature_acquisition.apply_signature(sig.into(), &weights),
         Acceptance::NeededIt
     );
 
-    let finalized_block = Box::new(FinalizedBlock::from(block.clone()));
-    builder.acquisition_state = BlockAcquisitionState::HaveFinalizedBlock(
-        Box::new(block),
-        finalized_block,
-        vec![Deploy::random(&mut rng)],
-        false,
-    );
+    let executable_block = Box::new(ExecutableBlock::from_block_and_transactions(
+        block.clone(),
+        vec![Transaction::random(&mut rng)],
+    ));
+    builder.acquisition_state =
+        BlockAcquisitionState::HaveExecutableBlock(Box::new(block.into()), executable_block, false);
 
     assert_eq!(builder.execution_progress, ExecutionProgress::Idle);
     // Register the block execution enquement as successful. This should
@@ -333,7 +340,7 @@ fn register_block_execution() {
     assert_eq!(builder.execution_progress, ExecutionProgress::Started);
     assert!(matches!(
         builder.acquisition_state,
-        BlockAcquisitionState::HaveFinalizedBlock(_, _, _, true)
+        BlockAcquisitionState::HaveExecutableBlock(_, _, true)
     ));
     assert!(!builder.is_failed());
     assert_ne!(latest_timestamp, builder.last_progress);
@@ -346,7 +353,7 @@ fn register_block_execution() {
     assert_eq!(builder.execution_progress, ExecutionProgress::Started);
     assert!(matches!(
         builder.acquisition_state,
-        BlockAcquisitionState::HaveFinalizedBlock(_, _, _, true)
+        BlockAcquisitionState::HaveExecutableBlock(_, _, true)
     ));
     assert!(!builder.is_failed());
     assert_ne!(latest_timestamp, builder.last_progress);
@@ -365,11 +372,12 @@ fn register_block_execution() {
 #[test]
 fn register_block_executed() {
     let mut rng = TestRng::new();
+    let chain_name_hash = ChainNameDigest::random(&mut rng);
     // Create a random block.
-    let block = Block::random(&mut rng);
+    let block = TestBlockBuilder::new().build(&mut rng);
     // Create a builder for the block.
     let mut builder = BlockBuilder::new(
-        block.header().block_hash(),
+        *block.hash(),
         false,
         1,
         TimeDiff::from_seconds(1),
@@ -379,7 +387,7 @@ fn register_block_executed() {
     let mut latest_timestamp = builder.last_progress;
     // Create mock era weights for the block's era.
     let weights = EraValidatorWeights::new(
-        block.header().era_id(),
+        block.era_id(),
         BTreeMap::from([(ALICE_PUBLIC_KEY.clone(), 100.into())]),
         Ratio::new(1, 3),
     );
@@ -388,19 +396,22 @@ fn register_block_executed() {
         vec![ALICE_PUBLIC_KEY.clone()],
         LegacyRequiredFinality::Strict,
     );
-    let sig = FinalitySignature::create(
+    let sig = FinalitySignatureV2::create(
         *block.hash(),
-        block.header().era_id(),
+        block.height(),
+        block.era_id(),
+        chain_name_hash,
         &ALICE_SECRET_KEY,
-        ALICE_PUBLIC_KEY.clone(),
     );
     assert_eq!(
-        signature_acquisition.apply_signature(sig, &weights),
+        signature_acquisition.apply_signature(sig.into(), &weights),
         Acceptance::NeededIt
     );
     // Set the builder state to `HaveStrictFinalitySignatures`.
-    builder.acquisition_state =
-        BlockAcquisitionState::HaveStrictFinalitySignatures(Box::new(block), signature_acquisition);
+    builder.acquisition_state = BlockAcquisitionState::HaveStrictFinalitySignatures(
+        Box::new(block.into()),
+        signature_acquisition,
+    );
     // Mark execution as started.
     builder.execution_progress = ExecutionProgress::Started;
 
@@ -433,11 +444,12 @@ fn register_block_executed() {
 #[test]
 fn register_block_marked_complete() {
     let mut rng = TestRng::new();
+    let chain_name_hash = ChainNameDigest::random(&mut rng);
     // Create a random block.
-    let block = Block::random(&mut rng);
+    let block = TestBlockBuilder::new().build(&mut rng);
     // Create a builder for the block.
     let mut builder = BlockBuilder::new(
-        block.header().block_hash(),
+        *block.hash(),
         false,
         1,
         TimeDiff::from_seconds(1),
@@ -449,7 +461,7 @@ fn register_block_marked_complete() {
     let mut latest_timestamp = builder.last_progress;
     // Create mock era weights for the block's era.
     let weights = EraValidatorWeights::new(
-        block.header().era_id(),
+        block.era_id(),
         BTreeMap::from([(ALICE_PUBLIC_KEY.clone(), 100.into())]),
         Ratio::new(1, 3),
     );
@@ -458,20 +470,21 @@ fn register_block_marked_complete() {
         vec![ALICE_PUBLIC_KEY.clone()],
         LegacyRequiredFinality::Strict,
     );
-    let sig = FinalitySignature::create(
+    let sig = FinalitySignatureV2::create(
         *block.hash(),
-        block.header().era_id(),
+        block.height(),
+        block.era_id(),
+        chain_name_hash,
         &ALICE_SECRET_KEY,
-        ALICE_PUBLIC_KEY.clone(),
     );
     assert_eq!(
-        signature_acquisition.apply_signature(sig, &weights),
+        signature_acquisition.apply_signature(sig.into(), &weights),
         Acceptance::NeededIt
     );
 
     // Set the builder state to `HaveStrictFinalitySignatures`.
     builder.acquisition_state = BlockAcquisitionState::HaveStrictFinalitySignatures(
-        Box::new(block.clone()),
+        Box::new(block.clone().into()),
         signature_acquisition.clone(),
     );
     // Register the block as marked complete. Since there are no missing
@@ -491,7 +504,7 @@ fn register_block_marked_complete() {
     builder.should_fetch_execution_state = false;
     // Set the builder state to `HaveStrictFinalitySignatures`.
     builder.acquisition_state = BlockAcquisitionState::HaveStrictFinalitySignatures(
-        Box::new(block),
+        Box::new(block.into()),
         signature_acquisition.clone(),
     );
     // Register the block as marked complete. In the forward flow we should
